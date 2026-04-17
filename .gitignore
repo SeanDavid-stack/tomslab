@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+build/
+dist/
+wheels/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Tom's Lab runtime data (local only, never commit)
+data/
+logs/
+exports/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# DCE exports (large — users drop their own)
+Exports/
+*.json_Files/
+Bookmap*.json
+
+# Installer artifacts
+*.exe
+*.msi
+installer/output/
+
+# Secrets
+.env
+*.key
+settings.local.json

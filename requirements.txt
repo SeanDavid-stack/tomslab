@@ -1,0 +1,3 @@
+# Phase 0 runtime dependencies.
+# Later phases will add: google-generativeai, ollama, sqlite-vss, paddleocr, Pillow, numpy, etc.
+PyQt6>=6.7.0
