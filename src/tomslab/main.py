@@ -1,45 +1,32 @@
-"""Tom's Lab — entry point. Phase 0: shows a Hello window."""
+"""Tom's Lab — entry point."""
 from __future__ import annotations
 
+import logging
 import sys
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont
-from PyQt6.QtWidgets import QApplication, QLabel, QMainWindow, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QApplication
 
-from tomslab import __app_name__, __version__
+from tomslab import __app_name__
+from tomslab.paths import log_path
+from tomslab.ui.main_window import MainWindow
 
 
-class HelloWindow(QMainWindow):
-    def __init__(self) -> None:
-        super().__init__()
-        self.setWindowTitle(f"{__app_name__} v{__version__}")
-        self.resize(720, 480)
-
-        central = QWidget()
-        layout = QVBoxLayout(central)
-        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        title = QLabel(f"Hello, {__app_name__}")
-        title_font = QFont()
-        title_font.setPointSize(28)
-        title_font.setBold(True)
-        title.setFont(title_font)
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        subtitle = QLabel("Phase 0 scaffold — ingestion and search arrive in Phase 1.")
-        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        subtitle.setStyleSheet("color: #888;")
-
-        layout.addWidget(title)
-        layout.addWidget(subtitle)
-        self.setCentralWidget(central)
+def _setup_logging() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s  %(levelname)-7s  %(name)s  %(message)s",
+        handlers=[
+            logging.FileHandler(log_path(), encoding="utf-8"),
+            logging.StreamHandler(sys.stderr),
+        ],
+    )
 
 
 def main() -> int:
+    _setup_logging()
     app = QApplication(sys.argv)
     app.setApplicationName(__app_name__)
-    window = HelloWindow()
+    window = MainWindow()
     window.show()
     return app.exec()
 
