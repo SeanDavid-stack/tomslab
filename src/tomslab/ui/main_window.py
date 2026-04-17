@@ -30,20 +30,23 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QStatusBar,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from tomslab import __app_name__, __version__
 from tomslab import db as dbmod
-from tomslab import embed_service, semantic
+from tomslab import embed_service, image_embed_service, semantic, visual
 from tomslab.ingest.importer import ImportResult
 from tomslab.paths import database_path
 from tomslab.search import SearchMode
 from tomslab.ui.embed_worker import EmbedWorker
+from tomslab.ui.gallery_view import GalleryView
+from tomslab.ui.image_embed_worker import ImageEmbedWorker
 from tomslab.ui.import_worker import ImportWorker
 from tomslab.ui.message_delegate import MessageDelegate
-from tomslab.ui.message_model import MAX_BROWSE_ROWS, MessageListModel
+from tomslab.ui.message_model import MAX_BROWSE_ROWS, MessageListModel, ROLE_MESSAGE
 from tomslab.ui.settings_dialog import SettingsDialog
 
 
@@ -66,6 +69,7 @@ class MainWindow(QMainWindow):
         self._delegate = MessageDelegate(self)
         self._worker: ImportWorker | None = None
         self._embed_worker: EmbedWorker | None = None
+        self._image_embed_worker: ImageEmbedWorker | None = None
 
         self._search_debounce = QTimer(self)
         self._search_debounce.setSingleShot(True)
@@ -108,9 +112,13 @@ class MainWindow(QMainWindow):
 
         file_menu.addSeparator()
 
-        self._build_embed_action = QAction("&Build embeddings…", self)
+        self._build_embed_action = QAction("&Build text embeddings…", self)
         self._build_embed_action.triggered.connect(self._on_build_embeddings)
         file_menu.addAction(self._build_embed_action)
+
+        self._build_image_embed_action = QAction("Build &image (CLIP) embeddings…", self)
+        self._build_image_embed_action.triggered.connect(self._on_build_image_embeddings)
+        file_menu.addAction(self._build_image_embed_action)
 
         settings_action = QAction("&Settings…", self)
         settings_action.setShortcut(QKeySequence("Ctrl+,"))
@@ -159,9 +167,8 @@ class MainWindow(QMainWindow):
         self._mode_combo = QComboBox()
         self._mode_combo.addItem("Keyword", userData="keyword")
         self._mode_combo.addItem("Semantic", userData="semantic")
-        self._mode_combo.addItem("Visual (Phase 4)", userData="visual")
+        self._mode_combo.addItem("Visual", userData="visual")
         self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
-        self._mode_combo.model().item(2).setEnabled(False)  # visual arrives in Phase 4
         self._mode_combo.setStyleSheet(
             "QComboBox { background: #1E1F22; color: #DBDEE1;"
             " padding: 6px 10px; border: 1px solid #3F4147; border-radius: 6px; }"
@@ -177,7 +184,7 @@ class MainWindow(QMainWindow):
         self._empty_hint.setStyleSheet("color: #949BA4; padding: 40px;")
         outer.addWidget(self._empty_hint)
 
-        # --- list view -------------------------------------------------
+        # --- feed tab --------------------------------------------------
         self._list = QListView()
         self._list.setModel(self._model)
         self._list.setItemDelegate(self._delegate)
@@ -189,7 +196,21 @@ class MainWindow(QMainWindow):
             "QListView { background: #1E1F22; border: none; }"
             "QListView::item { padding: 0; }"
         )
-        outer.addWidget(self._list, stretch=1)
+
+        # --- gallery tab ------------------------------------------------
+        self._gallery = GalleryView(self._conn, self)
+        self._gallery.message_activated.connect(self._jump_to_message)
+
+        self._tabs = QTabWidget()
+        self._tabs.setStyleSheet(
+            "QTabWidget::pane { border: 0; }"
+            "QTabBar::tab { background: #2B2D31; color: #DBDEE1; padding: 6px 14px; border: none; }"
+            "QTabBar::tab:selected { background: #5865F2; color: white; }"
+        )
+        self._tabs.addTab(self._list, "Feed")
+        self._tabs.addTab(self._gallery, "Gallery")
+        self._tabs.currentChanged.connect(self._on_tab_changed)
+        outer.addWidget(self._tabs, stretch=1)
 
         self.setCentralWidget(central)
 
@@ -216,6 +237,12 @@ class MainWindow(QMainWindow):
         mode = SearchMode(mode_str)
         self._delegate.set_match_terms(query if mode == SearchMode.KEYWORD else "")
         self._model.set_query(query, mode=mode)
+        # Gallery always reflects the search — visual mode uses CLIP, other
+        # modes fall back to "latest featured-speaker charts" (query ignored).
+        if mode == SearchMode.VISUAL:
+            self._gallery.set_query(query)
+        else:
+            self._gallery.set_query("")
         err = self._model.last_error()
         if err:
             QMessageBox.warning(self, "Search failed", err)
@@ -229,21 +256,100 @@ class MainWindow(QMainWindow):
         if mode == SearchMode.SEMANTIC and not semantic.available(self._conn):
             QMessageBox.information(
                 self,
-                "Embeddings not built",
-                "Semantic search needs embeddings.\n\n"
-                "Go to File → Build embeddings… to create them. "
+                "Text embeddings not built",
+                "Semantic search needs text embeddings.\n\n"
+                "File → Build text embeddings… creates them. "
                 "With Ollama's nomic-embed-text on a 3080-class GPU this takes ~5 min "
                 "for the full Bookmap corpus.",
             )
-            # revert to keyword
-            idx = self._mode_combo.findData("keyword")
-            if idx >= 0:
-                self._mode_combo.blockSignals(True)
-                self._mode_combo.setCurrentIndex(idx)
-                self._mode_combo.blockSignals(False)
+            self._revert_mode_to("keyword")
             return
+        if mode == SearchMode.VISUAL and not visual.available(self._conn):
+            QMessageBox.information(
+                self,
+                "Image embeddings not built",
+                "Visual search needs CLIP image embeddings.\n\n"
+                "File → Build image (CLIP) embeddings… creates them. "
+                "With ViT-B-32 on a 3080 Ti this takes ~5 min for 10K charts.",
+            )
+            self._revert_mode_to("keyword")
+            return
+        # Automatically flip to Gallery tab for visual queries — it's the natural view.
+        if mode == SearchMode.VISUAL:
+            self._tabs.setCurrentIndex(1)
         if self._search.text().strip():
             self._apply_search()
+
+    def _revert_mode_to(self, mode_key: str) -> None:
+        idx = self._mode_combo.findData(mode_key)
+        if idx >= 0:
+            self._mode_combo.blockSignals(True)
+            self._mode_combo.setCurrentIndex(idx)
+            self._mode_combo.blockSignals(False)
+
+    def _on_tab_changed(self, idx: int) -> None:
+        # When user switches to Gallery manually, make sure it reflects current query.
+        if idx == 1:
+            mode_str = self._mode_combo.currentData() or "keyword"
+            if mode_str == "visual":
+                self._gallery.set_query(self._search.text().strip())
+            else:
+                self._gallery.set_query("")
+        self._refresh_status()
+
+    # ------------------------------------------------------------------
+    # gallery → feed jump
+    # ------------------------------------------------------------------
+    def _jump_to_message(self, message_id: str) -> None:
+        # Clear search & switch to Feed, then try to scroll to the message.
+        self._search.blockSignals(True)
+        self._search.setText("")
+        self._search.blockSignals(False)
+        self._revert_mode_to("keyword")
+        self._model.set_query("", mode=SearchMode.KEYWORD)
+        self._tabs.setCurrentIndex(0)
+
+        # Scan loaded pages for the message; fetch more if needed.
+        target = self._find_row(message_id, load_pages=10)
+        if target is not None:
+            self._list.scrollTo(
+                self._model.index(target, 0),
+                hint=QListView.ScrollHint.PositionAtCenter,
+            )
+            self._list.setCurrentIndex(self._model.index(target, 0))
+        else:
+            # Fall back to a modal dialog with the message's content.
+            self._show_message_detail(message_id)
+
+    def _find_row(self, message_id: str, load_pages: int) -> int | None:
+        for _ in range(max(1, load_pages)):
+            for row in range(self._model.rowCount()):
+                msg = self._model.data(self._model.index(row, 0), ROLE_MESSAGE)
+                if msg is not None and getattr(msg, "id", None) == message_id:
+                    return row
+            if not self._model.canFetchMore(self._model.index(-1, -1)):
+                break
+            self._model.fetchMore(self._model.index(-1, -1))
+        return None
+
+    def _show_message_detail(self, message_id: str) -> None:
+        row = self._conn.execute(
+            """
+            SELECT m.author_nickname, m.author_name, m.timestamp, m.content
+              FROM messages m WHERE m.id = ?
+            """,
+            (message_id,),
+        ).fetchone()
+        if not row:
+            QMessageBox.information(self, "Not found", "Couldn't locate that message.")
+            return
+        who = row["author_nickname"] or row["author_name"] or "?"
+        ts = (row["timestamp"] or "")[:19].replace("T", " ")
+        QMessageBox.information(
+            self,
+            f"{who} · {ts}",
+            (row["content"] or "").strip() or "(no text)",
+        )
 
     # ------------------------------------------------------------------
     # drag and drop
@@ -300,6 +406,7 @@ class MainWindow(QMainWindow):
         self._progress_bar.setVisible(False)
         self._worker = None
         self._model.reload()
+        self._gallery.reload()
         self._refresh_status()
         QMessageBox.information(
             self,
@@ -384,6 +491,67 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "Embedding failed", err)
         self._refresh_status()
 
+    # ---- image (CLIP) embeddings --------------------------------------
+    def _on_build_image_embeddings(self) -> None:
+        if self._image_embed_worker is not None and self._image_embed_worker.isRunning():
+            QMessageBox.information(
+                self, "Already running", "Image embedding already in progress."
+            )
+            return
+        # Probe how many are pending using the currently-selected model tag.
+        clip_name = dbmod.get_setting(self._conn, "clip_model", "ViT-B-32") or "ViT-B-32"
+        clip_pre = dbmod.get_setting(self._conn, "clip_pretrained", "openai") or "openai"
+        pending = visual.pending_count(self._conn, f"{clip_name}:{clip_pre}")
+        if pending == 0:
+            QMessageBox.information(
+                self, "Nothing to embed", "All attachments are already CLIP-embedded."
+            )
+            return
+        reply = QMessageBox.question(
+            self,
+            "Build image embeddings",
+            f"Create CLIP ({clip_name}/{clip_pre}) embeddings for {pending:,} charts?\n\n"
+            "Takes roughly 5 minutes on a 3080-class GPU. Runs in the background.",
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Ok,
+        )
+        if reply != QMessageBox.StandardButton.Ok:
+            return
+
+        self._progress_bar.setVisible(True)
+        self._progress_bar.setRange(0, 0)
+        self._status_label.setText("CLIP-embedding images…")
+
+        self._image_embed_worker = ImageEmbedWorker(self)
+        self._image_embed_worker.progress.connect(self._on_image_embed_progress)
+        self._image_embed_worker.finished_ok.connect(self._on_image_embed_finished)
+        self._image_embed_worker.failed.connect(self._on_image_embed_failed)
+        self._image_embed_worker.start()
+
+    def _on_image_embed_progress(self, done: int, total: int, status: str) -> None:
+        if total > 0:
+            self._progress_bar.setRange(0, total)
+            self._progress_bar.setValue(done)
+            self._status_label.setText(f"Image embeddings: {status}")
+        else:
+            self._status_label.setText(f"Image embeddings: {status}")
+
+    def _on_image_embed_finished(self, n: int) -> None:
+        self._progress_bar.setVisible(False)
+        self._image_embed_worker = None
+        visual.invalidate_cache()
+        self._gallery.reload()
+        self._refresh_status()
+        QMessageBox.information(
+            self, "Image embeddings done", f"Embedded {n:,} new charts."
+        )
+
+    def _on_image_embed_failed(self, err: str) -> None:
+        self._progress_bar.setVisible(False)
+        self._image_embed_worker = None
+        QMessageBox.critical(self, "Image embedding failed", err)
+        self._refresh_status()
+
     # ------------------------------------------------------------------
     # status bar
     # ------------------------------------------------------------------
@@ -391,16 +559,22 @@ class MainWindow(QMainWindow):
         total = self._model.total_in_db()
         query = self._model.current_query()
         self._empty_hint.setVisible(total == 0)
-        self._list.setVisible(total > 0)
+        self._tabs.setVisible(total > 0)
         if total == 0:
             self._status_label.setText("Database empty. Import a DCE JSON to begin.")
             return
 
-        # Note embeddings status at tail end
-        pending = embed_service.pending_count(self._conn)
-        embed_note = ""
-        if pending > 0:
-            embed_note = f"   ·   {pending:,} windows not yet embedded (File → Build embeddings…)"
+        # Gather embedding-pending notes
+        pending_text = embed_service.pending_count(self._conn)
+        clip_name = dbmod.get_setting(self._conn, "clip_model", "ViT-B-32") or "ViT-B-32"
+        clip_pre = dbmod.get_setting(self._conn, "clip_pretrained", "openai") or "openai"
+        pending_img = visual.pending_count(self._conn, f"{clip_name}:{clip_pre}")
+        notes: list[str] = []
+        if pending_text > 0:
+            notes.append(f"{pending_text:,} windows need text embeddings")
+        if pending_img > 0:
+            notes.append(f"{pending_img:,} charts need CLIP embeddings")
+        embed_note = "   ·   " + "; ".join(notes) if notes else ""
 
         if query:
             matches = self._model.total_matches()
@@ -441,5 +615,7 @@ class MainWindow(QMainWindow):
             self._worker.wait(2000)
         if self._embed_worker is not None and self._embed_worker.isRunning():
             self._embed_worker.wait(2000)
+        if self._image_embed_worker is not None and self._image_embed_worker.isRunning():
+            self._image_embed_worker.wait(2000)
         self._conn.close()
         super().closeEvent(event)

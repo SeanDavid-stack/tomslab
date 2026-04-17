@@ -10,6 +10,20 @@ See [`toms_lab_prd.md`](toms_lab_prd.md) for the full product spec.
 
 ## Status
 
+**Phase 4 — Visual search + chart gallery** ✅
+- CLIP (open_clip, ViT-B-32/openai) joint image-text embeddings, stored as
+  raw float32 bytes in `image_embeddings`
+- Extension-filtered pipeline (images only — skips audio/video/pdf/docx
+  attachments that DCE also captures)
+- Visual mode in the search combo and a dedicated Gallery tab with a grid
+  of thumbnails; clicking a chart jumps to its message in the Feed
+- Runs on the 3080 Ti (CUDA) with graceful CPU fallback
+- Numpy cosine over a cached in-memory matrix — under 100 ms per query
+  after the first cache warmup
+
+Benchmark: 10,098 chart attachments embedded in ~6.4 min total (27 imgs/s,
+512 dim, `ViT-B-32:openai`) on the 3080 Ti.
+
 **Phase 3 — AI provider layer + semantic search** ✅
 - Clean `AIProvider` abstraction with `Ollama` (local, default for embed/vision)
   and `Gemini` (cloud, default for chat) implementations
@@ -76,8 +90,10 @@ Toms Lab/
 │   ├── paths.py          # %APPDATA%/TomsLab layout
 │   ├── db.py             # SQLite schema + connection
 │   ├── search.py         # FTS5 query builder
-│   ├── semantic.py       # Cosine-similarity search (numpy)
-│   ├── embed_service.py  # Batch embedding pipeline
+│   ├── semantic.py       # Text cosine search (numpy)
+│   ├── visual.py         # CLIP joint image/text embeddings + search
+│   ├── embed_service.py  # Text embedding pipeline
+│   ├── image_embed_service.py  # CLIP image embedding pipeline
 │   ├── secret_store.py   # XOR-masked API key storage
 │   ├── ai/
 │   │   ├── base.py       # AIProvider abstract interface
@@ -92,9 +108,11 @@ Toms Lab/
 │       ├── main_window.py
 │       ├── message_model.py
 │       ├── message_delegate.py   # Discord-style message cards
+│       ├── gallery_view.py       # CLIP-backed chart grid
 │       ├── settings_dialog.py    # AI Providers settings
 │       ├── import_worker.py
-│       └── embed_worker.py
+│       ├── embed_worker.py
+│       └── image_embed_worker.py
 ├── pyproject.toml
 ├── requirements.txt
 ├── requirements-dev.txt
@@ -122,8 +140,8 @@ All user data lives under `%APPDATA%/TomsLab/` (never in the repo):
 | 0 | Repo + Hello window |
 | 1 | DCE JSON → SQLite ingestion + message list UI |
 | 2 | Keyword search + Discord-style feed |
-| 3 | AI provider abstraction + semantic search ← **current** |
-| 4 | Visual / CLIP search + chart gallery |
+| 3 | AI provider abstraction + semantic search |
+| 4 | Visual / CLIP search + chart gallery ← **current** |
 | 5 | "Ask Tom" conversational RAG |
 | 6 | Vision chart descriptions + concepts + dedup |
 | 7 | Bookmarks + first-run wizard |

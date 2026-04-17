@@ -149,6 +149,19 @@ CREATE TABLE IF NOT EXISTS imports (
     attachments_added INTEGER DEFAULT 0
 );
 
+-- ---- Image embeddings (Phase 4) --------------------------------------------
+-- CLIP joint-space embeddings (image + text share the same vector space),
+-- one row per attachment. 512-dim for ViT-B-32, larger for bigger models.
+CREATE TABLE IF NOT EXISTS image_embeddings (
+    attachment_id TEXT PRIMARY KEY,
+    model TEXT NOT NULL,
+    dim INTEGER NOT NULL,
+    embedding BLOB NOT NULL,
+    generated_at TEXT,
+    FOREIGN KEY (attachment_id) REFERENCES attachments(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_image_embeddings_model ON image_embeddings(model);
+
 -- ---- Window embeddings (Phase 3) -------------------------------------------
 -- One row per conversation_window. The embedding is stored as raw float32
 -- bytes — for the corpus size we care about (~18K rows) a plain numpy
@@ -190,6 +203,9 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "chat_model_ollama": "llama3.1:8b",
     "chat_model_gemini": "gemini-2.5-flash",
     "vision_model_ollama": "llava:13b",
+    # Phase 4 — CLIP for visual search.
+    "clip_model": "ViT-B-32",
+    "clip_pretrained": "openai",
     "schema_version": "1",
 }
 

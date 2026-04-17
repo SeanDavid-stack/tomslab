@@ -17,6 +17,7 @@ from PyQt6.QtCore import QAbstractListModel, QModelIndex, Qt
 
 from tomslab import search as searchmod
 from tomslab import semantic as semanticmod
+from tomslab import visual as visualmod
 from tomslab.search import SearchMode
 
 
@@ -106,6 +107,15 @@ class MessageListModel(QAbstractListModel):
             if self._mode == SearchMode.SEMANTIC:
                 try:
                     self._search_ids = semanticmod.semantic_search_ids(
+                        self._conn, self._query, limit=MAX_SEARCH_ROWS
+                    )
+                except Exception as exc:
+                    self._last_error = f"{type(exc).__name__}: {exc}"
+                    self._search_ids = []
+                self._total_full = len(self._search_ids)
+            elif self._mode == SearchMode.VISUAL:
+                try:
+                    self._search_ids = visualmod.visual_search_message_ids(
                         self._conn, self._query, limit=MAX_SEARCH_ROWS
                     )
                 except Exception as exc:

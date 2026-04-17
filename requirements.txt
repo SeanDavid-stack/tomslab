@@ -1,8 +1,14 @@
-# Runtime dependencies (phases 0-3).
-# Later phases will add: paddleocr, Pillow (for CLIP / vision features).
+# Runtime dependencies (phases 0-4).
+# Later phases will add: paddleocr (OCR — optional, Phase 6).
 PyQt6>=6.7.0
 ijson>=3.2.0
 platformdirs>=4.0.0
 numpy>=2.0
 ollama>=0.4
 google-genai>=1.0
+# Phase 4 — CLIP for visual search.
+Pillow>=10.0
+# Install torch/torchvision separately; on Windows w/ NVIDIA:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu129
+#   pip install "torchvision==0.24.0" --no-deps
+open-clip-torch>=3.0

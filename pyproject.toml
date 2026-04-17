@@ -27,6 +27,9 @@ dependencies = [
     "numpy>=2.0",
     "ollama>=0.4",
     "google-genai>=1.0",
+    "Pillow>=10.0",
+    "open-clip-torch>=3.0",
+    # torch is installed separately with the CUDA index — see requirements.txt
 ]
 
 [project.optional-dependencies]
