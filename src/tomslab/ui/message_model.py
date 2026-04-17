@@ -16,6 +16,8 @@ from typing import Any, Optional
 from PyQt6.QtCore import QAbstractListModel, QModelIndex, Qt
 
 from tomslab import search as searchmod
+from tomslab import semantic as semanticmod
+from tomslab.search import SearchMode
 
 
 PAGE_SIZE = 200
@@ -58,21 +60,39 @@ class MessageListModel(QAbstractListModel):
         self._total_full = 0             # true match count (uncapped, search only)
         self._loaded = 0
         self._query: str = ""
+        self._mode: SearchMode = SearchMode.KEYWORD
         self._search_ids: list[str] = []   # pre-resolved IDs in search mode
+        self._last_error: str = ""
         self.reload()
 
     # ------------------------------------------------------------------
     # public API
     # ------------------------------------------------------------------
-    def set_query(self, query: str) -> None:
+    def set_query(self, query: str, mode: SearchMode | None = None) -> None:
         query = (query or "").strip()
-        if query == self._query:
+        if mode is None:
+            mode = self._mode
+        if query == self._query and mode == self._mode:
             return
         self._query = query
+        self._mode = mode
         self.reload()
+
+    def set_mode(self, mode: SearchMode) -> None:
+        if mode == self._mode:
+            return
+        self._mode = mode
+        if self._query:
+            self.reload()
 
     def current_query(self) -> str:
         return self._query
+
+    def current_mode(self) -> SearchMode:
+        return self._mode
+
+    def last_error(self) -> str:
+        return self._last_error
 
     def reload(self) -> None:
         self.beginResetModel()
@@ -80,12 +100,23 @@ class MessageListModel(QAbstractListModel):
         self._loaded = 0
         self._search_ids = []
         self._total_full = 0
+        self._last_error = ""
 
         if self._query:
-            self._total_full = searchmod.count_keyword_hits(self._conn, self._query)
-            self._search_ids = searchmod.keyword_search_ids(
-                self._conn, self._query, limit=MAX_SEARCH_ROWS
-            )
+            if self._mode == SearchMode.SEMANTIC:
+                try:
+                    self._search_ids = semanticmod.semantic_search_ids(
+                        self._conn, self._query, limit=MAX_SEARCH_ROWS
+                    )
+                except Exception as exc:
+                    self._last_error = f"{type(exc).__name__}: {exc}"
+                    self._search_ids = []
+                self._total_full = len(self._search_ids)
+            else:
+                self._total_full = searchmod.count_keyword_hits(self._conn, self._query)
+                self._search_ids = searchmod.keyword_search_ids(
+                    self._conn, self._query, limit=MAX_SEARCH_ROWS
+                )
             self._total = len(self._search_ids)
         else:
             row = self._conn.execute("SELECT COUNT(*) AS n FROM messages").fetchone()

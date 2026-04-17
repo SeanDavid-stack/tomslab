@@ -13,7 +13,7 @@ from enum import Enum
 
 class SearchMode(str, Enum):
     KEYWORD = "keyword"
-    SEMANTIC = "semantic"   # Phase 3
+    SEMANTIC = "semantic"
     VISUAL = "visual"       # Phase 4
 
 

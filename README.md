@@ -10,6 +10,21 @@ See [`toms_lab_prd.md`](toms_lab_prd.md) for the full product spec.
 
 ## Status
 
+**Phase 3 — AI provider layer + semantic search** ✅
+- Clean `AIProvider` abstraction with `Ollama` (local, default for embed/vision)
+  and `Gemini` (cloud, default for chat) implementations
+- Provider registry maps role → provider from user settings
+- Settings dialog lets the user change assignments, paste a Gemini API key
+  (stored XOR-masked in SQLite), and "Test connection" per provider
+- Batch-embedding pipeline (resumable, runs off the UI thread)
+- Semantic search over `conversation_windows` using numpy cosine over an
+  in-memory normalised matrix — lazily loaded and cached
+- Mode combo (Keyword / Semantic / Visual-disabled) + Build-embeddings menu
+
+Benchmark: all 17,909 windows embedded in ~3 min via Ollama `nomic-embed-text`
+on a 3080 Ti (768 dim, 101 texts/s avg). Post-cache warmup, semantic
+queries return in <200 ms.
+
 **Phase 2 — Keyword search + Discord UI** ✅
 - FTS5 full-text index over message content, author name, nickname
 - Search bar with debounced query, prefix matching, quoted phrases
@@ -60,16 +75,26 @@ Toms Lab/
 │   ├── main.py           # Qt entry point
 │   ├── paths.py          # %APPDATA%/TomsLab layout
 │   ├── db.py             # SQLite schema + connection
-│   ├── search.py         # FTS5 query builder + result retrieval
+│   ├── search.py         # FTS5 query builder
+│   ├── semantic.py       # Cosine-similarity search (numpy)
+│   ├── embed_service.py  # Batch embedding pipeline
+│   ├── secret_store.py   # XOR-masked API key storage
+│   ├── ai/
+│   │   ├── base.py       # AIProvider abstract interface
+│   │   ├── ollama_provider.py
+│   │   ├── gemini.py
+│   │   └── registry.py   # Role → provider mapping
 │   ├── ingest/
-│   │   ├── dce.py        # Streaming DiscordChatExporter JSON parser
-│   │   ├── importer.py   # Orchestrates import run
-│   │   └── windows.py    # Builds conversation windows
+│   │   ├── dce.py        # Streaming DCE JSON parser
+│   │   ├── importer.py
+│   │   └── windows.py    # Conversation-window builder
 │   └── ui/
 │       ├── main_window.py
 │       ├── message_model.py
 │       ├── message_delegate.py   # Discord-style message cards
-│       └── import_worker.py
+│       ├── settings_dialog.py    # AI Providers settings
+│       ├── import_worker.py
+│       └── embed_worker.py
 ├── pyproject.toml
 ├── requirements.txt
 ├── requirements-dev.txt
@@ -96,8 +121,8 @@ All user data lives under `%APPDATA%/TomsLab/` (never in the repo):
 |------:|-------------|
 | 0 | Repo + Hello window |
 | 1 | DCE JSON → SQLite ingestion + message list UI |
-| 2 | Keyword search + Discord-style feed ← **current** |
-| 3 | AI provider abstraction + semantic search |
+| 2 | Keyword search + Discord-style feed |
+| 3 | AI provider abstraction + semantic search ← **current** |
 | 4 | Visual / CLIP search + chart gallery |
 | 5 | "Ask Tom" conversational RAG |
 | 6 | Vision chart descriptions + concepts + dedup |

@@ -36,11 +36,15 @@ from PyQt6.QtWidgets import (
 
 from tomslab import __app_name__, __version__
 from tomslab import db as dbmod
+from tomslab import embed_service, semantic
 from tomslab.ingest.importer import ImportResult
 from tomslab.paths import database_path
+from tomslab.search import SearchMode
+from tomslab.ui.embed_worker import EmbedWorker
 from tomslab.ui.import_worker import ImportWorker
 from tomslab.ui.message_delegate import MessageDelegate
 from tomslab.ui.message_model import MAX_BROWSE_ROWS, MessageListModel
+from tomslab.ui.settings_dialog import SettingsDialog
 
 
 # cap the image cache so 10K messages worth of charts don't eat all RAM
@@ -61,6 +65,7 @@ class MainWindow(QMainWindow):
         self._model = MessageListModel(self._conn, self)
         self._delegate = MessageDelegate(self)
         self._worker: ImportWorker | None = None
+        self._embed_worker: EmbedWorker | None = None
 
         self._search_debounce = QTimer(self)
         self._search_debounce.setSingleShot(True)
@@ -103,6 +108,17 @@ class MainWindow(QMainWindow):
 
         file_menu.addSeparator()
 
+        self._build_embed_action = QAction("&Build embeddings…", self)
+        self._build_embed_action.triggered.connect(self._on_build_embeddings)
+        file_menu.addAction(self._build_embed_action)
+
+        settings_action = QAction("&Settings…", self)
+        settings_action.setShortcut(QKeySequence("Ctrl+,"))
+        settings_action.triggered.connect(self._open_settings)
+        file_menu.addAction(settings_action)
+
+        file_menu.addSeparator()
+
         quit_action = QAction("&Quit", self)
         quit_action.setShortcut(QKeySequence("Ctrl+Q"))
         quit_action.triggered.connect(self.close)
@@ -142,11 +158,10 @@ class MainWindow(QMainWindow):
 
         self._mode_combo = QComboBox()
         self._mode_combo.addItem("Keyword", userData="keyword")
-        self._mode_combo.addItem("Semantic (Phase 3)", userData="semantic")
+        self._mode_combo.addItem("Semantic", userData="semantic")
         self._mode_combo.addItem("Visual (Phase 4)", userData="visual")
-        # disable the future modes so users don't think they're broken
-        self._mode_combo.model().item(1).setEnabled(False)
-        self._mode_combo.model().item(2).setEnabled(False)
+        self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
+        self._mode_combo.model().item(2).setEnabled(False)  # visual arrives in Phase 4
         self._mode_combo.setStyleSheet(
             "QComboBox { background: #1E1F22; color: #DBDEE1;"
             " padding: 6px 10px; border: 1px solid #3F4147; border-radius: 6px; }"
@@ -197,12 +212,38 @@ class MainWindow(QMainWindow):
 
     def _apply_search(self) -> None:
         query = self._search.text().strip()
-        self._delegate.set_match_terms(query)
-        self._model.set_query(query)
-        # Reset scroll on each new search
+        mode_str = self._mode_combo.currentData() or "keyword"
+        mode = SearchMode(mode_str)
+        self._delegate.set_match_terms(query if mode == SearchMode.KEYWORD else "")
+        self._model.set_query(query, mode=mode)
+        err = self._model.last_error()
+        if err:
+            QMessageBox.warning(self, "Search failed", err)
         self._list.scrollToTop()
         self._list.viewport().update()
         self._refresh_status()
+
+    def _on_mode_changed(self, _idx: int) -> None:
+        mode_str = self._mode_combo.currentData() or "keyword"
+        mode = SearchMode(mode_str)
+        if mode == SearchMode.SEMANTIC and not semantic.available(self._conn):
+            QMessageBox.information(
+                self,
+                "Embeddings not built",
+                "Semantic search needs embeddings.\n\n"
+                "Go to File → Build embeddings… to create them. "
+                "With Ollama's nomic-embed-text on a 3080-class GPU this takes ~5 min "
+                "for the full Bookmap corpus.",
+            )
+            # revert to keyword
+            idx = self._mode_combo.findData("keyword")
+            if idx >= 0:
+                self._mode_combo.blockSignals(True)
+                self._mode_combo.setCurrentIndex(idx)
+                self._mode_combo.blockSignals(False)
+            return
+        if self._search.text().strip():
+            self._apply_search()
 
     # ------------------------------------------------------------------
     # drag and drop
@@ -277,6 +318,73 @@ class MainWindow(QMainWindow):
         self._refresh_status()
 
     # ------------------------------------------------------------------
+    # embeddings + settings
+    # ------------------------------------------------------------------
+    def _open_settings(self) -> None:
+        dlg = SettingsDialog(self._conn, self)
+        dlg.exec()
+        # refresh status (embed/chat provider name may have changed)
+        self._refresh_status()
+
+    def _on_build_embeddings(self) -> None:
+        if self._embed_worker is not None and self._embed_worker.isRunning():
+            QMessageBox.information(self, "Already running", "An embedding run is already in progress.")
+            return
+        pending = embed_service.pending_count(self._conn)
+        if pending == 0:
+            QMessageBox.information(
+                self,
+                "Nothing to embed",
+                "All conversation windows are already embedded.",
+            )
+            return
+        reply = QMessageBox.question(
+            self,
+            "Build embeddings",
+            f"Create embeddings for {pending:,} conversation windows?\n\n"
+            "This enables Semantic search. Uses the embedding provider configured in "
+            "Settings → AI Providers (Ollama by default). "
+            "Runs in the background; you can keep browsing.",
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Ok,
+        )
+        if reply != QMessageBox.StandardButton.Ok:
+            return
+
+        self._progress_bar.setVisible(True)
+        self._progress_bar.setRange(0, 0)
+        self._status_label.setText("Embedding…")
+
+        self._embed_worker = EmbedWorker(self)
+        self._embed_worker.progress.connect(self._on_embed_progress)
+        self._embed_worker.finished_ok.connect(self._on_embed_finished)
+        self._embed_worker.failed.connect(self._on_embed_failed)
+        self._embed_worker.start()
+
+    def _on_embed_progress(self, done: int, total: int, status: str) -> None:
+        if total > 0:
+            self._progress_bar.setRange(0, total)
+            self._progress_bar.setValue(done)
+            self._status_label.setText(f"Embedding: {status}")
+        else:
+            self._status_label.setText(f"Embedding: {status}")
+
+    def _on_embed_finished(self, n: int) -> None:
+        self._progress_bar.setVisible(False)
+        self._embed_worker = None
+        semantic.invalidate_cache()
+        self._refresh_status()
+        QMessageBox.information(
+            self, "Embeddings done", f"Embedded {n:,} new windows."
+        )
+
+    def _on_embed_failed(self, err: str) -> None:
+        self._progress_bar.setVisible(False)
+        self._embed_worker = None
+        QMessageBox.critical(self, "Embedding failed", err)
+        self._refresh_status()
+
+    # ------------------------------------------------------------------
     # status bar
     # ------------------------------------------------------------------
     def _refresh_status(self) -> None:
@@ -287,21 +395,29 @@ class MainWindow(QMainWindow):
         if total == 0:
             self._status_label.setText("Database empty. Import a DCE JSON to begin.")
             return
+
+        # Note embeddings status at tail end
+        pending = embed_service.pending_count(self._conn)
+        embed_note = ""
+        if pending > 0:
+            embed_note = f"   ·   {pending:,} windows not yet embedded (File → Build embeddings…)"
+
         if query:
             matches = self._model.total_matches()
             loadable = self._model.total_loadable()
+            mode = self._model.current_mode().value
             if matches > loadable:
                 text = (
-                    f"{matches:,} matches for “{query}”   ·   "
+                    f"{matches:,} {mode} matches for “{query}”   ·   "
                     f"showing top {loadable:,}   ·   {total:,} in DB"
                 )
             else:
-                text = f"{matches:,} matches for “{query}”   ·   {total:,} messages in DB"
-            self._status_label.setText(text)
+                text = f"{matches:,} {mode} matches for “{query}”   ·   {total:,} messages in DB"
+            self._status_label.setText(text + embed_note)
         else:
             shown = min(total, MAX_BROWSE_ROWS)
             self._status_label.setText(
-                f"{total:,} messages in DB   ·   showing newest {shown:,}"
+                f"{total:,} messages in DB   ·   showing newest {shown:,}" + embed_note
             )
 
     # ------------------------------------------------------------------
@@ -323,5 +439,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:
         if self._worker is not None and self._worker.isRunning():
             self._worker.wait(2000)
+        if self._embed_worker is not None and self._embed_worker.isRunning():
+            self._embed_worker.wait(2000)
         self._conn.close()
         super().closeEvent(event)

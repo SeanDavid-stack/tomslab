@@ -149,6 +149,20 @@ CREATE TABLE IF NOT EXISTS imports (
     attachments_added INTEGER DEFAULT 0
 );
 
+-- ---- Window embeddings (Phase 3) -------------------------------------------
+-- One row per conversation_window. The embedding is stored as raw float32
+-- bytes — for the corpus size we care about (~18K rows) a plain numpy
+-- cosine sweep is <100ms, so sqlite-vss / sqlite-vec is unnecessary weight.
+CREATE TABLE IF NOT EXISTS window_embeddings (
+    window_id INTEGER PRIMARY KEY,
+    model TEXT NOT NULL,
+    dim INTEGER NOT NULL,
+    embedding BLOB NOT NULL,
+    generated_at TEXT,
+    FOREIGN KEY (window_id) REFERENCES conversation_windows(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_window_embeddings_model ON window_embeddings(model);
+
 -- ---- FTS5 keyword index (Phase 2) ------------------------------------------
 -- Contentless-external: we manage inserts explicitly so we can index both
 -- the display name and the message text in a single row.
@@ -166,8 +180,16 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "featured_speaker_username": "tom_b_trades",
     "conversation_window_before": "3",
     "conversation_window_after": "5",
-    "ai_provider_primary": "gemini",
-    "ai_provider_fallback": "ollama",
+    # Phase 3 defaults: Ollama for bulk embedding (no rate limits, local),
+    # leaving Gemini available in the same provider layer for chat later.
+    "ai_provider_embed": "ollama",
+    "ai_provider_chat": "gemini",
+    "ai_provider_vision": "ollama",
+    "embed_model_ollama": "nomic-embed-text",
+    "embed_model_gemini": "gemini-embedding-001",
+    "chat_model_ollama": "llama3.1:8b",
+    "chat_model_gemini": "gemini-2.5-flash",
+    "vision_model_ollama": "llava:13b",
     "schema_version": "1",
 }
 

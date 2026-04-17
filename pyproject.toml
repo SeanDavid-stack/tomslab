@@ -24,6 +24,9 @@ dependencies = [
     "PyQt6>=6.7.0",
     "ijson>=3.2.0",
     "platformdirs>=4.0.0",
+    "numpy>=2.0",
+    "ollama>=0.4",
+    "google-genai>=1.0",
 ]
 
 [project.optional-dependencies]
