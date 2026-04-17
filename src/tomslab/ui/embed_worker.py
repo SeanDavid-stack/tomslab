@@ -14,21 +14,31 @@ class EmbedWorker(QThread):
     finished_ok = pyqtSignal(int)           # count embedded
     failed = pyqtSignal(str)
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, scope: str = "both", parent=None) -> None:
+        """scope: 'windows' | 'docs' | 'both'"""
         super().__init__(parent)
+        self._scope = scope
 
     def run(self) -> None:
         try:
             conn = dbmod.connect()
             dbmod.initialise(conn)
             provider = registry.get_embed_provider(conn)
-            n = embed_service.embed_pending(
-                conn,
-                provider,
-                progress=lambda d, t, s: self.progress.emit(d, t, s),
-            )
+            total_done = 0
+            if self._scope in ("windows", "both"):
+                total_done += embed_service.embed_pending(
+                    conn,
+                    provider,
+                    progress=lambda d, t, s: self.progress.emit(d, t, f"windows: {s}"),
+                )
+            if self._scope in ("docs", "both"):
+                total_done += embed_service.embed_pending_doc_pages(
+                    conn,
+                    provider,
+                    progress=lambda d, t, s: self.progress.emit(d, t, f"doc pages: {s}"),
+                )
             conn.close()
-            self.finished_ok.emit(n)
+            self.finished_ok.emit(total_done)
         except (ProviderError, ProviderUnavailable) as exc:
             self.failed.emit(str(exc))
         except Exception as exc:

@@ -12,3 +12,7 @@ Pillow>=10.0
 #   pip install torch --index-url https://download.pytorch.org/whl/cu129
 #   pip install "torchvision==0.24.0" --no-deps
 open-clip-torch>=3.0
+# Phase 4.5 — doc ingest (PDF → PNG + OCR).
+pypdfium2>=4.0
+pdfplumber>=0.11
+easyocr>=1.7

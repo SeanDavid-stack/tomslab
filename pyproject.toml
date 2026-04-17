@@ -29,6 +29,9 @@ dependencies = [
     "google-genai>=1.0",
     "Pillow>=10.0",
     "open-clip-torch>=3.0",
+    "pypdfium2>=4.0",
+    "pdfplumber>=0.11",
+    "easyocr>=1.7",
     # torch is installed separately with the CUDA index — see requirements.txt
 ]
 

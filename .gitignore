@@ -42,6 +42,11 @@ Exports/
 *.json_Files/
 Bookmap*.json
 
+# User-provided reference docs (copyrighted / third-party / large)
+tom_docs/
+# Belt & suspenders: any PDFs dropped at the repo root stay local too.
+/*.pdf
+
 # Installer artifacts
 *.exe
 *.msi

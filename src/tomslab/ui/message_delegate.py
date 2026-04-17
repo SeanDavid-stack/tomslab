@@ -32,10 +32,12 @@ from tomslab.ui.message_model import ROLE_MESSAGE, MessageRow
 COLOR_BG_NORMAL = QColor("#2B2D31")   # Discord-ish dark background
 COLOR_BG_HOVER  = QColor("#32353C")
 COLOR_BG_GOLD   = QColor("#3A3320")   # subtle gold tint for Tom
+COLOR_BG_DOC    = QColor("#1F2A3A")   # muted blue tint for doc pages
 COLOR_TEXT      = QColor("#DBDEE1")
 COLOR_TEXT_DIM  = QColor("#949BA4")
 COLOR_AUTHOR    = QColor("#F2F3F5")
 COLOR_GOLD      = QColor("#FFC857")   # gold accent for Tom's name
+COLOR_DOC_BLUE  = QColor("#6AA1FF")   # accent for doc pages
 COLOR_REPLY_BAR = QColor("#4E5058")
 COLOR_DIVIDER   = QColor(255, 255, 255, 16)
 
@@ -104,16 +106,21 @@ class MessageDelegate(QStyledItemDelegate):
 
         rect: QRect = option.rect
         # --- background --------------------------------------------------
+        is_doc = msg.doc_meta is not None
         if option.state & QStyle.StateFlag.State_Selected:
             bg = COLOR_BG_HOVER.darker(110)
+        elif is_doc:
+            bg = COLOR_BG_DOC
         elif msg.is_featured_speaker:
             bg = COLOR_BG_GOLD
         else:
             bg = COLOR_BG_NORMAL
         painter.fillRect(rect, bg)
 
-        # left gold accent bar for Tom
-        if msg.is_featured_speaker:
+        # left accent bar: gold for Tom Discord, blue for doc pages, none otherwise.
+        if is_doc:
+            painter.fillRect(rect.x(), rect.y(), 3, rect.height(), COLOR_DOC_BLUE)
+        elif msg.is_featured_speaker:
             painter.fillRect(rect.x(), rect.y(), 3, rect.height(), COLOR_GOLD)
 
         # --- layout ------------------------------------------------------
@@ -167,10 +174,18 @@ def _paint_header(
     name_font.setBold(True)
     painter.setFont(name_font)
 
-    name_color = COLOR_GOLD if msg.is_featured_speaker else COLOR_AUTHOR
+    is_doc = msg.doc_meta is not None
+    if is_doc:
+        name_color = COLOR_DOC_BLUE
+    elif msg.is_featured_speaker:
+        name_color = COLOR_GOLD
+    else:
+        name_color = COLOR_AUTHOR
     painter.setPen(name_color)
 
     display = msg.author_nickname or msg.author_name or "?"
+    if is_doc:
+        display = f"📄 {display}"
     fm = painter.fontMetrics()
     name_rect = QRect(x, y, width, HEADER_H)
     painter.drawText(

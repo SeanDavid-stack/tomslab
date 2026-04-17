@@ -10,6 +10,27 @@ See [`toms_lab_prd.md`](toms_lab_prd.md) for the full product spec.
 
 ## Status
 
+**Phase 4.5 — Reference PDF ingest** ✅
+- Drops Tom's authored PDFs (glossary, 60 Structured Trades, Market Structure,
+  Opening Context Alignment, Bookmap Settings, ...) and third-party references
+  (Best Loser Wins, Trade Your Way) into a first-class corpus
+- PDFs → per-page PNG render (pypdfium2, 150 dpi)
+- Extracted text via pdfplumber; EasyOCR on GPU for image-only pages
+  (2–3 s/page). Tried LLaVA first — it hallucinated meta-commentary rather
+  than transcribing. Tried Gemini Vision — fine on single pages but free-tier
+  RPM makes bulk runs impractical. EasyOCR is fast, local, and actually
+  transcribes.
+- Every doc page gets text-embedded via Ollama alongside Discord windows
+- Semantic search now returns a merged `message + doc_page` feed; Tom's PDFs
+  get a small score boost so definitional queries surface the authored source
+  before Discord chatter
+- Doc hits render as blue-accented 📄 cards with the rendered page inline;
+  Feed shares the same scroll as Discord messages
+
+Benchmark: 10 PDFs / 591 pages ingested in 6 min (128 OCR calls +
+pdfplumber extracts elsewhere); all 591 pages text-embedded via Ollama
+in 10.7 s.
+
 **Phase 4 — Visual search + chart gallery** ✅
 - CLIP (open_clip, ViT-B-32/openai) joint image-text embeddings, stored as
   raw float32 bytes in `image_embeddings`
@@ -92,9 +113,13 @@ Toms Lab/
 │   ├── search.py         # FTS5 query builder
 │   ├── semantic.py       # Text cosine search (numpy)
 │   ├── visual.py         # CLIP joint image/text embeddings + search
-│   ├── embed_service.py  # Text embedding pipeline
+│   ├── embed_service.py  # Text embedding pipeline (Discord windows + doc pages)
 │   ├── image_embed_service.py  # CLIP image embedding pipeline
 │   ├── secret_store.py   # XOR-masked API key storage
+│   ├── docs/
+│   │   ├── pdf_render.py # pypdfium2 → PNG
+│   │   ├── ocr.py        # EasyOCR (default) / LLaVA / Gemini OCR
+│   │   └── importer.py   # Document ingest orchestrator
 │   ├── ai/
 │   │   ├── base.py       # AIProvider abstract interface
 │   │   ├── ollama_provider.py

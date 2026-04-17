@@ -21,6 +21,55 @@ from tomslab import visual as visualmod
 from tomslab.search import SearchMode
 
 
+def _synthesize_doc_row(r: sqlite3.Row) -> "MessageRow":
+    """Turn a document_pages row into a feed-friendly MessageRow."""
+    author_label = r["author"] or "unknown"
+    if author_label == "tom_b":
+        author_nick = f"Tom B  · {r['title']}"
+        is_featured = True
+    elif author_label == "third_party":
+        author_nick = f"Reference: {r['title']}"
+        is_featured = False
+    else:
+        author_nick = r["title"] or r["fn"] or "Document"
+        is_featured = False
+
+    text = (r["text"] or "").strip()
+    meta = {
+        "doc_id": int(r["did"]),
+        "page_num": int(r["pnum"]),
+        "filename": r["fn"] or "",
+        "title": r["title"] or "",
+        "author": author_label,
+        "doc_type": r["dtype"] or "",
+        "rendered_path": r["rpath"] or "",
+    }
+    # attach the rendered page image as an "attachment" so the message
+    # delegate renders the page thumbnail inline.
+    attachments: list[AttachmentRow] = []
+    if r["rpath"]:
+        attachments.append(AttachmentRow(
+            id=f"doc-{r['did']}-p{r['pnum']}",
+            filename=f"page_{int(r['pnum']):04d}.png",
+            local_path=r["rpath"],
+            file_size=0,
+        ))
+    return MessageRow(
+        id=f"doc:{int(r['pid'])}",
+        author_name=author_label,
+        author_nickname=author_nick,
+        timestamp=f"📄 page {int(r['pnum'])}",
+        content=text,
+        is_featured_speaker=is_featured,
+        is_pinned=False,
+        reply_to_id=None,
+        reply_to_author=None,
+        reply_to_snippet=None,
+        attachments=attachments,
+        doc_meta=meta,
+    )
+
+
 PAGE_SIZE = 200
 MAX_BROWSE_ROWS = 10_000     # cap when no search query is active
 MAX_SEARCH_ROWS = 2_000      # cap when searching
@@ -50,6 +99,10 @@ class MessageRow:
     reply_to_author: Optional[str]
     reply_to_snippet: Optional[str]
     attachments: list[AttachmentRow] = field(default_factory=list)
+    # If the row represents a PDF doc page rather than a Discord message
+    # we set this to a non-None dict. The delegate renders it with a
+    # "📄 Document" styling and no reply/pinned/star affordances.
+    doc_meta: Optional[dict] = None
 
 
 class MessageListModel(QAbstractListModel):
@@ -62,7 +115,8 @@ class MessageListModel(QAbstractListModel):
         self._loaded = 0
         self._query: str = ""
         self._mode: SearchMode = SearchMode.KEYWORD
-        self._search_ids: list[str] = []   # pre-resolved IDs in search mode
+        self._search_ids: list[str] = []   # pre-resolved typed IDs in search mode
+        self._mixed_hits: list = []        # MixedSemanticHit for semantic mode
         self._last_error: str = ""
         self.reload()
 
@@ -106,11 +160,17 @@ class MessageListModel(QAbstractListModel):
         if self._query:
             if self._mode == SearchMode.SEMANTIC:
                 try:
-                    self._search_ids = semanticmod.semantic_search_ids(
+                    self._mixed_hits = semanticmod.mixed_semantic_search(
                         self._conn, self._query, limit=MAX_SEARCH_ROWS
                     )
+                    self._search_ids = [
+                        f"msg:{h.message_id}" if h.source_type == "message"
+                        else f"doc:{h.doc_page.page_id}"
+                        for h in self._mixed_hits
+                    ]
                 except Exception as exc:
                     self._last_error = f"{type(exc).__name__}: {exc}"
+                    self._mixed_hits = []
                     self._search_ids = []
                 self._total_full = len(self._search_ids)
             elif self._mode == SearchMode.VISUAL:
@@ -191,7 +251,7 @@ class MessageListModel(QAbstractListModel):
         take = min(PAGE_SIZE, self._total - self._loaded)
         if self._query:
             batch_ids = self._search_ids[self._loaded : self._loaded + take]
-            message_rows = self._fetch_by_ids(batch_ids, preserve_order=True)
+            message_rows = self._fetch_mixed_by_typed_ids(batch_ids)
         else:
             message_rows = self._fetch_browse(offset=self._loaded, limit=take)
 
@@ -204,6 +264,70 @@ class MessageListModel(QAbstractListModel):
         self._rows.extend(message_rows)
         self._loaded += len(message_rows)
         self.endInsertRows()
+
+    def _fetch_mixed_by_typed_ids(self, typed_ids: list[str]) -> list[MessageRow]:
+        """Fetch rows whose ids are either 'msg:<id>' or 'doc:<page_id>'.
+
+        Message IDs hit the regular messages path; doc IDs hit document_pages
+        and get turned into a synthetic MessageRow with ``doc_meta`` set so
+        the delegate renders them with a doc-style card.
+        """
+        msg_ids: list[str] = []
+        doc_ids: list[int] = []
+        order: list[tuple[str, str]] = []   # (kind, raw-id)
+        for t in typed_ids:
+            if t.startswith("msg:"):
+                mid = t[4:]
+                if mid:
+                    msg_ids.append(mid)
+                    order.append(("msg", mid))
+            elif t.startswith("doc:"):
+                try:
+                    did = int(t[4:])
+                except ValueError:
+                    continue
+                doc_ids.append(did)
+                order.append(("doc", str(did)))
+            else:
+                # fallback: treat bare ids as message ids (keyword/visual path)
+                if t:
+                    msg_ids.append(t)
+                    order.append(("msg", t))
+
+        msg_by_id: dict[str, MessageRow] = {}
+        if msg_ids:
+            for r in self._fetch_by_ids(msg_ids, preserve_order=False):
+                msg_by_id[r.id] = r
+
+        doc_by_id: dict[str, MessageRow] = {}
+        if doc_ids:
+            placeholders = ",".join("?" * len(doc_ids))
+            rows = self._conn.execute(
+                f"""
+                SELECT p.id AS pid, p.page_num AS pnum, p.rendered_path AS rpath,
+                       COALESCE(NULLIF(p.ocr_text,''), p.extracted_text) AS text,
+                       d.id AS did, d.title AS title, d.filename AS fn,
+                       d.author AS author, d.doc_type AS dtype
+                  FROM document_pages p
+                  JOIN documents d ON d.id = p.document_id
+                 WHERE p.id IN ({placeholders})
+                """,
+                doc_ids,
+            ).fetchall()
+            for r in rows:
+                doc_by_id[str(int(r["pid"]))] = _synthesize_doc_row(r)
+
+        out: list[MessageRow] = []
+        for kind, raw in order:
+            if kind == "msg":
+                row = msg_by_id.get(raw)
+                if row:
+                    out.append(row)
+            else:
+                row = doc_by_id.get(raw)
+                if row:
+                    out.append(row)
+        return out
 
     def _fetch_browse(self, offset: int, limit: int) -> list[MessageRow]:
         rows = self._conn.execute(

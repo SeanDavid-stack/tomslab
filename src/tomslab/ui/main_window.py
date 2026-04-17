@@ -437,20 +437,30 @@ class MainWindow(QMainWindow):
         if self._embed_worker is not None and self._embed_worker.isRunning():
             QMessageBox.information(self, "Already running", "An embedding run is already in progress.")
             return
-        pending = embed_service.pending_count(self._conn)
-        if pending == 0:
+        pending_windows = embed_service.pending_count(self._conn)
+        pending_docs = embed_service.pending_doc_pages_count(self._conn)
+        total_pending = pending_windows + pending_docs
+        if total_pending == 0:
             QMessageBox.information(
                 self,
                 "Nothing to embed",
-                "All conversation windows are already embedded.",
+                "All conversation windows and doc pages are already embedded.",
             )
             return
+
+        desc_lines = []
+        if pending_windows:
+            desc_lines.append(f"  • {pending_windows:,} conversation windows")
+        if pending_docs:
+            desc_lines.append(f"  • {pending_docs:,} PDF doc pages")
+        desc = "\n".join(desc_lines)
+
         reply = QMessageBox.question(
             self,
-            "Build embeddings",
-            f"Create embeddings for {pending:,} conversation windows?\n\n"
-            "This enables Semantic search. Uses the embedding provider configured in "
-            "Settings → AI Providers (Ollama by default). "
+            "Build text embeddings",
+            f"Create embeddings for:\n{desc}\n\n"
+            "This enables Semantic search (Discord + Tom's reference PDFs merged). "
+            "Uses the embedding provider configured in Settings → AI Providers. "
             "Runs in the background; you can keep browsing.",
             QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Ok,
@@ -462,7 +472,7 @@ class MainWindow(QMainWindow):
         self._progress_bar.setRange(0, 0)
         self._status_label.setText("Embedding…")
 
-        self._embed_worker = EmbedWorker(self)
+        self._embed_worker = EmbedWorker(scope="both", parent=self)
         self._embed_worker.progress.connect(self._on_embed_progress)
         self._embed_worker.finished_ok.connect(self._on_embed_finished)
         self._embed_worker.failed.connect(self._on_embed_failed)
@@ -480,9 +490,10 @@ class MainWindow(QMainWindow):
         self._progress_bar.setVisible(False)
         self._embed_worker = None
         semantic.invalidate_cache()
+        semantic.invalidate_doc_cache()
         self._refresh_status()
         QMessageBox.information(
-            self, "Embeddings done", f"Embedded {n:,} new windows."
+            self, "Embeddings done", f"Embedded {n:,} new windows / doc pages."
         )
 
     def _on_embed_failed(self, err: str) -> None:
@@ -566,12 +577,15 @@ class MainWindow(QMainWindow):
 
         # Gather embedding-pending notes
         pending_text = embed_service.pending_count(self._conn)
+        pending_doc = embed_service.pending_doc_pages_count(self._conn)
         clip_name = dbmod.get_setting(self._conn, "clip_model", "ViT-B-32") or "ViT-B-32"
         clip_pre = dbmod.get_setting(self._conn, "clip_pretrained", "openai") or "openai"
         pending_img = visual.pending_count(self._conn, f"{clip_name}:{clip_pre}")
         notes: list[str] = []
         if pending_text > 0:
             notes.append(f"{pending_text:,} windows need text embeddings")
+        if pending_doc > 0:
+            notes.append(f"{pending_doc:,} doc pages need text embeddings")
         if pending_img > 0:
             notes.append(f"{pending_img:,} charts need CLIP embeddings")
         embed_note = "   ·   " + "; ".join(notes) if notes else ""

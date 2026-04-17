@@ -38,6 +38,20 @@ def pending_count(conn: sqlite3.Connection) -> int:
     return int(row["n"] or 0)
 
 
+def pending_doc_pages_count(conn: sqlite3.Connection) -> int:
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS n
+          FROM document_pages p
+         WHERE (COALESCE(p.ocr_text,'') || COALESCE(p.extracted_text,'')) != ''
+           AND NOT EXISTS (
+                SELECT 1 FROM document_page_embeddings pe WHERE pe.page_id = p.id
+           )
+        """
+    ).fetchone()
+    return int(row["n"] or 0)
+
+
 def embed_pending(
     conn: sqlite3.Connection,
     provider: AIProvider,
@@ -110,4 +124,72 @@ def embed_pending(
         progress(done, total_pending, f"{done:,} / {total_pending:,}")
 
     progress(total_pending, total_pending, "Done")
+    return done
+
+
+def embed_pending_doc_pages(
+    conn: sqlite3.Connection,
+    provider: AIProvider,
+    progress: ProgressFn = _noop,
+    batch_size: int = BATCH_SIZE,
+) -> int:
+    """Embed every document page whose text exists but no embedding row does."""
+    if not provider.supports_embed():
+        raise ProviderError(f"{provider.name} does not support embeddings")
+
+    model = provider.embedding_model_name()
+    dim = provider.embedding_dim()
+
+    total = pending_doc_pages_count(conn)
+    if total == 0:
+        progress(0, 0, "No doc pages need embedding.")
+        return 0
+
+    progress(0, total, f"Embedding doc pages with {provider.name}/{model}…")
+
+    done = 0
+    while True:
+        rows = conn.execute(
+            """
+            SELECT p.id AS id,
+                   COALESCE(NULLIF(p.ocr_text,''), p.extracted_text) AS text
+              FROM document_pages p
+             WHERE (COALESCE(p.ocr_text,'') || COALESCE(p.extracted_text,'')) != ''
+               AND NOT EXISTS (
+                    SELECT 1 FROM document_page_embeddings pe WHERE pe.page_id = p.id
+               )
+             ORDER BY p.id
+             LIMIT ?
+            """,
+            (batch_size,),
+        ).fetchall()
+        if not rows:
+            break
+
+        texts = [(r["text"] or "")[:MAX_TEXT_CHARS] for r in rows]
+        vectors = provider.embed_texts(texts)
+        if len(vectors) != len(rows):
+            raise ProviderError(
+                f"provider returned {len(vectors)} embeddings for {len(rows)} inputs"
+            )
+
+        now = datetime.now(timezone.utc).isoformat()
+        payload = []
+        for r, v in zip(rows, vectors):
+            arr = np.asarray(v, dtype=np.float32)
+            if arr.size != dim:
+                dim = arr.size
+            payload.append((int(r["id"]), model, int(arr.size), arr.tobytes(), now))
+
+        conn.executemany(
+            "INSERT OR REPLACE INTO document_page_embeddings("
+            "page_id, model, dim, embedding, generated_at"
+            ") VALUES (?,?,?,?,?)",
+            payload,
+        )
+        conn.commit()
+        done += len(rows)
+        progress(done, total, f"{done:,} / {total:,}")
+
+    progress(total, total, "Done")
     return done

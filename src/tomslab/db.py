@@ -136,6 +136,44 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT
 );
 
+-- ---- Tom-authored & third-party reference documents (PDF corpus) ----------
+CREATE TABLE IF NOT EXISTS documents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT,
+    filename TEXT UNIQUE,
+    author TEXT,            -- 'tom_b' | 'third_party' | 'unknown'
+    doc_type TEXT,          -- 'authoritative' | 'reference'
+    source_path TEXT,
+    page_count INTEGER,
+    added_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_documents_author ON documents(author);
+
+CREATE TABLE IF NOT EXISTS document_pages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    document_id INTEGER NOT NULL,
+    page_num INTEGER NOT NULL,
+    rendered_path TEXT,           -- path to rendered PNG
+    extracted_text TEXT,          -- what pdfplumber found (may be empty)
+    ocr_text TEXT,                -- what Gemini Vision OCR produced
+    caption TEXT,                 -- reserved for future LLaVA captioning
+    text_source TEXT,             -- 'extracted' | 'ocr' | 'combined'
+    added_at TEXT,
+    UNIQUE (document_id, page_num),
+    FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_document_pages_doc ON document_pages(document_id);
+
+CREATE TABLE IF NOT EXISTS document_page_embeddings (
+    page_id INTEGER PRIMARY KEY,
+    model TEXT NOT NULL,
+    dim INTEGER NOT NULL,
+    embedding BLOB NOT NULL,
+    generated_at TEXT,
+    FOREIGN KEY (page_id) REFERENCES document_pages(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_doc_page_embed_model ON document_page_embeddings(model);
+
 -- ---- imports log (so we can resume / show history) -------------------------
 CREATE TABLE IF NOT EXISTS imports (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -206,6 +244,10 @@ DEFAULT_SETTINGS: dict[str, str] = {
     # Phase 4 — CLIP for visual search.
     "clip_model": "ViT-B-32",
     "clip_pretrained": "openai",
+    # Phase 4.5 — OCR engine for the PDF doc ingest.
+    # easyocr: fast, local, classical CV. ollama: LLaVA (tends to describe,
+    # not transcribe — avoid for OCR). gemini: rate-limited on free tier.
+    "ocr_provider": "easyocr",
     "schema_version": "1",
 }
 
