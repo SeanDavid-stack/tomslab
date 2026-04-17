@@ -1,18 +1,30 @@
-"""Main application window — Phase 1.
+"""Main application window — Phase 2.
 
-Shows a list of imported messages and provides File → Import (and drag-and-drop)
-for DCE JSON files. Search, highlighting, chart rendering, and the other
-goodies arrive in Phase 2+.
+Phase 1 gave us import + a plain list.  Phase 2 adds:
+  * search bar (keyword mode via FTS5; semantic/visual placeholders)
+  * Discord-styled cards (gold accent for Tom, replies, inline charts,
+    in-body match highlighting)
 """
 from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QAction, QDragEnterEvent, QDropEvent, QKeySequence
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import (
+    QAction,
+    QColor,
+    QDragEnterEvent,
+    QDropEvent,
+    QKeySequence,
+    QPalette,
+    QPixmapCache,
+)
 from PyQt6.QtWidgets import (
+    QComboBox,
     QFileDialog,
+    QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListView,
     QMainWindow,
     QMessageBox,
@@ -27,27 +39,59 @@ from tomslab import db as dbmod
 from tomslab.ingest.importer import ImportResult
 from tomslab.paths import database_path
 from tomslab.ui.import_worker import ImportWorker
-from tomslab.ui.message_model import MAX_ROWS, MessageListModel
+from tomslab.ui.message_delegate import MessageDelegate
+from tomslab.ui.message_model import MAX_BROWSE_ROWS, MessageListModel
+
+
+# cap the image cache so 10K messages worth of charts don't eat all RAM
+QPixmapCache.setCacheLimit(256 * 1024)  # 256 MB
 
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle(f"{__app_name__} v{__version__}")
-        self.resize(1100, 700)
+        self.resize(1200, 820)
         self.setAcceptDrops(True)
+        self._apply_dark_palette()
 
         self._conn = dbmod.connect()
         dbmod.initialise(self._conn)
 
         self._model = MessageListModel(self._conn, self)
+        self._delegate = MessageDelegate(self)
         self._worker: ImportWorker | None = None
+
+        self._search_debounce = QTimer(self)
+        self._search_debounce.setSingleShot(True)
+        self._search_debounce.setInterval(250)
+        self._search_debounce.timeout.connect(self._apply_search)
 
         self._build_menu()
         self._build_ui()
         self._refresh_status()
 
-    # ---- UI construction ----------------------------------------------
+    # ------------------------------------------------------------------
+    # palette
+    # ------------------------------------------------------------------
+    def _apply_dark_palette(self) -> None:
+        pal = QPalette()
+        pal.setColor(QPalette.ColorRole.Window, QColor("#1E1F22"))
+        pal.setColor(QPalette.ColorRole.WindowText, QColor("#DBDEE1"))
+        pal.setColor(QPalette.ColorRole.Base, QColor("#2B2D31"))
+        pal.setColor(QPalette.ColorRole.AlternateBase, QColor("#2B2D31"))
+        pal.setColor(QPalette.ColorRole.Text, QColor("#DBDEE1"))
+        pal.setColor(QPalette.ColorRole.Button, QColor("#2B2D31"))
+        pal.setColor(QPalette.ColorRole.ButtonText, QColor("#DBDEE1"))
+        pal.setColor(QPalette.ColorRole.Highlight, QColor("#5865F2"))
+        pal.setColor(QPalette.ColorRole.HighlightedText, QColor("#FFFFFF"))
+        pal.setColor(QPalette.ColorRole.ToolTipBase, QColor("#2B2D31"))
+        pal.setColor(QPalette.ColorRole.ToolTipText, QColor("#DBDEE1"))
+        self.setPalette(pal)
+
+    # ------------------------------------------------------------------
+    # menus
+    # ------------------------------------------------------------------
     def _build_menu(self) -> None:
         menu = self.menuBar()
         file_menu = menu.addMenu("&File")
@@ -69,32 +113,75 @@ class MainWindow(QMainWindow):
         about_action.triggered.connect(self._show_about)
         help_menu.addAction(about_action)
 
+    # ------------------------------------------------------------------
+    # main widgets
+    # ------------------------------------------------------------------
     def _build_ui(self) -> None:
         central = QWidget()
-        layout = QVBoxLayout(central)
-        layout.setContentsMargins(8, 8, 8, 8)
+        outer = QVBoxLayout(central)
+        outer.setContentsMargins(10, 8, 10, 6)
+        outer.setSpacing(6)
 
+        # --- search bar ------------------------------------------------
+        bar = QHBoxLayout()
+        bar.setSpacing(8)
+
+        self._search = QLineEdit()
+        self._search.setPlaceholderText(
+            "Search messages (keyword) — e.g. VPOC absorption, overnight inventory…"
+        )
+        self._search.setClearButtonEnabled(True)
+        self._search.textChanged.connect(self._on_search_text_changed)
+        self._search.returnPressed.connect(self._apply_search)
+        self._search.setStyleSheet(
+            "QLineEdit { background: #1E1F22; color: #DBDEE1; padding: 6px 10px;"
+            " border: 1px solid #3F4147; border-radius: 6px; }"
+            "QLineEdit:focus { border: 1px solid #5865F2; }"
+        )
+        bar.addWidget(self._search, stretch=1)
+
+        self._mode_combo = QComboBox()
+        self._mode_combo.addItem("Keyword", userData="keyword")
+        self._mode_combo.addItem("Semantic (Phase 3)", userData="semantic")
+        self._mode_combo.addItem("Visual (Phase 4)", userData="visual")
+        # disable the future modes so users don't think they're broken
+        self._mode_combo.model().item(1).setEnabled(False)
+        self._mode_combo.model().item(2).setEnabled(False)
+        self._mode_combo.setStyleSheet(
+            "QComboBox { background: #1E1F22; color: #DBDEE1;"
+            " padding: 6px 10px; border: 1px solid #3F4147; border-radius: 6px; }"
+        )
+        bar.addWidget(self._mode_combo)
+        outer.addLayout(bar)
+
+        # --- empty state hint ------------------------------------------
         self._empty_hint = QLabel(
             "No messages yet. Drag a DCE JSON file here, or File → Import DCE JSON (Ctrl+I)."
         )
         self._empty_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._empty_hint.setStyleSheet("color: #888; padding: 40px;")
-        layout.addWidget(self._empty_hint)
+        self._empty_hint.setStyleSheet("color: #949BA4; padding: 40px;")
+        outer.addWidget(self._empty_hint)
 
+        # --- list view -------------------------------------------------
         self._list = QListView()
         self._list.setModel(self._model)
-        self._list.setUniformItemSizes(True)
-        self._list.setAlternatingRowColors(True)
+        self._list.setItemDelegate(self._delegate)
+        self._list.setUniformItemSizes(False)   # our delegate returns variable heights
         self._list.setSelectionMode(QListView.SelectionMode.SingleSelection)
+        self._list.setVerticalScrollMode(QListView.ScrollMode.ScrollPerPixel)
+        self._list.setSpacing(0)
         self._list.setStyleSheet(
-            "QListView { font-family: Consolas, 'Courier New', monospace; font-size: 12px; }"
+            "QListView { background: #1E1F22; border: none; }"
+            "QListView::item { padding: 0; }"
         )
-        layout.addWidget(self._list, stretch=1)
+        outer.addWidget(self._list, stretch=1)
 
         self.setCentralWidget(central)
 
+        # status bar
         sb = QStatusBar()
         self._status_label = QLabel("")
+        self._status_label.setStyleSheet("color: #949BA4;")
         sb.addWidget(self._status_label, stretch=1)
         self._progress_bar = QProgressBar()
         self._progress_bar.setMaximumWidth(240)
@@ -102,7 +189,24 @@ class MainWindow(QMainWindow):
         sb.addPermanentWidget(self._progress_bar)
         self.setStatusBar(sb)
 
-    # ---- drag and drop -------------------------------------------------
+    # ------------------------------------------------------------------
+    # search
+    # ------------------------------------------------------------------
+    def _on_search_text_changed(self, _text: str) -> None:
+        self._search_debounce.start()
+
+    def _apply_search(self) -> None:
+        query = self._search.text().strip()
+        self._delegate.set_match_terms(query)
+        self._model.set_query(query)
+        # Reset scroll on each new search
+        self._list.scrollToTop()
+        self._list.viewport().update()
+        self._refresh_status()
+
+    # ------------------------------------------------------------------
+    # drag and drop
+    # ------------------------------------------------------------------
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if event.mimeData().hasUrls():
             for url in event.mimeData().urls():
@@ -118,7 +222,9 @@ class MainWindow(QMainWindow):
                 self._start_import(Path(path))
                 return
 
-    # ---- import flow ---------------------------------------------------
+    # ------------------------------------------------------------------
+    # import flow
+    # ------------------------------------------------------------------
     def _on_import_clicked(self) -> None:
         path_str, _ = QFileDialog.getOpenFileName(
             self, "Import DCE JSON", "", "DCE JSON export (*.json)"
@@ -130,9 +236,8 @@ class MainWindow(QMainWindow):
         if self._worker is not None and self._worker.isRunning():
             QMessageBox.information(self, "Import running", "Another import is still running.")
             return
-
         self._progress_bar.setVisible(True)
-        self._progress_bar.setRange(0, 0)  # indeterminate until count is known
+        self._progress_bar.setRange(0, 0)
         self._status_label.setText(f"Importing {json_path.name}…")
 
         self._worker = ImportWorker(json_path, self)
@@ -155,14 +260,15 @@ class MainWindow(QMainWindow):
         self._worker = None
         self._model.reload()
         self._refresh_status()
-        msg = (
+        QMessageBox.information(
+            self,
+            "Import complete",
             f"Import complete.\n\n"
             f"Added: {result.messages_added:,} messages, "
             f"{result.attachments_added:,} attachments.\n"
             f"Skipped (already in DB): {result.messages_skipped:,}.\n"
-            f"Conversation windows built: {result.windows_built:,}."
+            f"Conversation windows built: {result.windows_built:,}.",
         )
-        QMessageBox.information(self, "Import complete", msg)
 
     def _on_import_failed(self, err: str) -> None:
         self._progress_bar.setVisible(False)
@@ -170,20 +276,37 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "Import failed", err)
         self._refresh_status()
 
-    # ---- status bar ----------------------------------------------------
+    # ------------------------------------------------------------------
+    # status bar
+    # ------------------------------------------------------------------
     def _refresh_status(self) -> None:
         total = self._model.total_in_db()
+        query = self._model.current_query()
         self._empty_hint.setVisible(total == 0)
         self._list.setVisible(total > 0)
         if total == 0:
             self._status_label.setText("Database empty. Import a DCE JSON to begin.")
             return
-        shown = min(total, MAX_ROWS)
-        self._status_label.setText(
-            f"{total:,} messages in DB   ·   showing newest {shown:,}   ·   {database_path()}"
-        )
+        if query:
+            matches = self._model.total_matches()
+            loadable = self._model.total_loadable()
+            if matches > loadable:
+                text = (
+                    f"{matches:,} matches for “{query}”   ·   "
+                    f"showing top {loadable:,}   ·   {total:,} in DB"
+                )
+            else:
+                text = f"{matches:,} matches for “{query}”   ·   {total:,} messages in DB"
+            self._status_label.setText(text)
+        else:
+            shown = min(total, MAX_BROWSE_ROWS)
+            self._status_label.setText(
+                f"{total:,} messages in DB   ·   showing newest {shown:,}"
+            )
 
-    # ---- about ---------------------------------------------------------
+    # ------------------------------------------------------------------
+    # about
+    # ------------------------------------------------------------------
     def _show_about(self) -> None:
         QMessageBox.about(
             self,
@@ -194,7 +317,9 @@ class MainWindow(QMainWindow):
             f"Database: <code>{database_path()}</code>",
         )
 
-    # ---- teardown ------------------------------------------------------
+    # ------------------------------------------------------------------
+    # teardown
+    # ------------------------------------------------------------------
     def closeEvent(self, event) -> None:
         if self._worker is not None and self._worker.isRunning():
             self._worker.wait(2000)

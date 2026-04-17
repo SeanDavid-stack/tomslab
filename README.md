@@ -10,16 +10,20 @@ See [`toms_lab_prd.md`](toms_lab_prd.md) for the full product spec.
 
 ## Status
 
-**Phase 1 — Ingestion pipeline** ✅
-- Streaming DCE JSON parser (handles 400 MB+ exports in O(1) memory)
-- SQLite schema from PRD §6, stored at `%APPDATA%/TomsLab/data/tomslab.db`
-- Messages + attachments import, idempotent (re-importing skips existing message IDs)
-- Conversation windows built around every featured-speaker message
-- Main window with File → Import (Ctrl+I), drag-and-drop for `.json` files,
-  paginated message list (newest first, 500 per page, up to 10,000 shown)
+**Phase 2 — Keyword search + Discord UI** ✅
+- FTS5 full-text index over message content, author name, nickname
+- Search bar with debounced query, prefix matching, quoted phrases
+- Custom-painted message cards: gold accent for Tom, inline chart thumbnails,
+  reply previews (↪ replying to @user), in-body match highlighting
+- Dark Discord-inspired palette
+- 7,350 VPOC hits / 150 absorption hits / etc. indexed in ~2 s backfill
 
-Benchmark: full 195,300-message / 429 MB Bookmap export imports in ~27 s on
-a Ryzen 9 5900X.
+**Phase 1 — Ingestion pipeline** ✅
+- Streaming DCE JSON parser (400 MB+ exports in O(1) memory)
+- SQLite schema from PRD §6, at `%APPDATA%/TomsLab/data/tomslab.db`
+- Idempotent import (re-running skips existing message IDs)
+- Conversation windows built around every featured-speaker message
+- Benchmark: 195,300-message / 429 MB import in ~27 s on a Ryzen 9 5900X
 
 **Phase 0 — Repo scaffolding** ✅
 
@@ -56,6 +60,7 @@ Toms Lab/
 │   ├── main.py           # Qt entry point
 │   ├── paths.py          # %APPDATA%/TomsLab layout
 │   ├── db.py             # SQLite schema + connection
+│   ├── search.py         # FTS5 query builder + result retrieval
 │   ├── ingest/
 │   │   ├── dce.py        # Streaming DiscordChatExporter JSON parser
 │   │   ├── importer.py   # Orchestrates import run
@@ -63,6 +68,7 @@ Toms Lab/
 │   └── ui/
 │       ├── main_window.py
 │       ├── message_model.py
+│       ├── message_delegate.py   # Discord-style message cards
 │       └── import_worker.py
 ├── pyproject.toml
 ├── requirements.txt
@@ -89,8 +95,8 @@ All user data lives under `%APPDATA%/TomsLab/` (never in the repo):
 | Phase | Deliverable |
 |------:|-------------|
 | 0 | Repo + Hello window |
-| 1 | DCE JSON → SQLite ingestion + message list UI ← **current** |
-| 2 | Keyword search + Discord-style feed |
+| 1 | DCE JSON → SQLite ingestion + message list UI |
+| 2 | Keyword search + Discord-style feed ← **current** |
 | 3 | AI provider abstraction + semantic search |
 | 4 | Visual / CLIP search + chart gallery |
 | 5 | "Ask Tom" conversational RAG |

@@ -148,6 +148,17 @@ CREATE TABLE IF NOT EXISTS imports (
     messages_skipped INTEGER DEFAULT 0,
     attachments_added INTEGER DEFAULT 0
 );
+
+-- ---- FTS5 keyword index (Phase 2) ------------------------------------------
+-- Contentless-external: we manage inserts explicitly so we can index both
+-- the display name and the message text in a single row.
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+    id UNINDEXED,
+    content,
+    author_name,
+    author_nickname,
+    tokenize = "porter unicode61 remove_diacritics 2"
+);
 """
 
 # Phase-1 defaults — set once on fresh DBs, never overwritten.
@@ -180,6 +191,34 @@ def initialise(conn: sqlite3.Connection) -> None:
         conn.execute(
             "INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)", (k, v)
         )
+    conn.commit()
+    _backfill_fts(conn)
+
+
+def _backfill_fts(conn: sqlite3.Connection) -> None:
+    """Populate the FTS5 index for any messages that aren't in it yet.
+
+    Runs once on first launch after Phase 2 is deployed against an existing
+    database; subsequent imports add rows incrementally via the importer.
+    """
+    row = conn.execute("SELECT COUNT(*) AS n FROM messages").fetchone()
+    msg_count = int(row["n"] or 0)
+    row = conn.execute("SELECT COUNT(*) AS n FROM messages_fts").fetchone()
+    fts_count = int(row["n"] or 0)
+    if fts_count >= msg_count or msg_count == 0:
+        return
+
+    conn.execute("DELETE FROM messages_fts")
+    conn.execute(
+        """
+        INSERT INTO messages_fts(id, content, author_name, author_nickname)
+        SELECT id,
+               COALESCE(content, ''),
+               COALESCE(author_name, ''),
+               COALESCE(author_nickname, '')
+          FROM messages
+        """
+    )
     conn.commit()
 
 

@@ -198,6 +198,28 @@ def _flush_batch(
         message_rows,
     )
 
+    # Mirror into FTS5. Skip any IDs already there (re-import safety).
+    existing_fts = {
+        r[0]
+        for r in conn.execute(
+            "SELECT id FROM messages_fts WHERE id IN ("
+            + ",".join("?" * len(batch))
+            + ")",
+            [m.id for m in batch],
+        )
+    } if batch else set()
+    fts_rows = [
+        (m.id, m.content or "", m.author_name or "", m.author_nickname or "")
+        for m in batch
+        if m.id not in existing_fts
+    ]
+    if fts_rows:
+        conn.executemany(
+            "INSERT INTO messages_fts(id, content, author_name, author_nickname) "
+            "VALUES (?,?,?,?)",
+            fts_rows,
+        )
+
     attachment_rows = []
     for m in batch:
         for a in m.attachments:
