@@ -43,6 +43,7 @@ from tomslab.paths import database_path
 from tomslab.search import SearchMode
 from tomslab.ui.chat_view import ChatView
 from tomslab.ui.concept_bar import ConceptChipBar
+from tomslab.ui.detail_dialog import DetailDialog
 from tomslab.ui.embed_worker import EmbedWorker
 from tomslab.ui.gallery_view import GalleryView, ROLE_PATH as GALLERY_ROLE_PATH
 from tomslab.ui.image_embed_worker import ImageEmbedWorker
@@ -89,6 +90,7 @@ class MainWindow(QMainWindow):
         self._embed_worker: EmbedWorker | None = None
         self._image_embed_worker: ImageEmbedWorker | None = None
         self._image_viewer: ImageViewerDialog | None = None
+        self._detail_dialog: DetailDialog | None = None
 
         self._search_debounce = QTimer(self)
         self._search_debounce.setSingleShot(True)
@@ -189,6 +191,31 @@ class MainWindow(QMainWindow):
             " background: #1E1F22; border-radius: 12px;"
         )
         hlay.addWidget(self._header_counts)
+
+        # Feed noise filter toggle — on by default, kills one-word replies,
+        # emoji-only messages, "lol"/"ok"/etc. from the browse feed.
+        from PyQt6.QtWidgets import QPushButton
+        self._noise_toggle = QPushButton()
+        self._noise_toggle.setCheckable(True)
+        self._noise_toggle.setChecked(self._model.hide_noise())
+        self._noise_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._noise_toggle.setToolTip(
+            "Hide reactions and one-word replies from the feed.\n"
+            "Tom's messages and messages with charts are always kept."
+        )
+        self._noise_toggle.setStyleSheet(
+            "QPushButton { background: #1E1F22; color: #DBDEE1;"
+            " font-size: 11px; padding: 5px 11px;"
+            " border: 1px solid #3F4147; border-radius: 12px; }"
+            "QPushButton:checked { background: #3A3320; color: #FFC857;"
+            " border: 1px solid #FFC857; }"
+            "QPushButton:hover { color: white; }"
+        )
+        self._noise_toggle.clicked.connect(self._on_noise_toggle)
+        hlay.addSpacing(6)
+        hlay.addWidget(self._noise_toggle)
+        self._update_noise_toggle_label()
+
         outer.addWidget(header)
 
         # Body layout resumes with its own margins
@@ -376,6 +403,17 @@ class MainWindow(QMainWindow):
             self._mode_combo.setCurrentIndex(idx)
             self._mode_combo.blockSignals(False)
 
+    def _on_noise_toggle(self, checked: bool) -> None:
+        self._model.set_hide_noise(checked)
+        self._update_noise_toggle_label()
+        self._refresh_status()
+
+    def _update_noise_toggle_label(self) -> None:
+        if self._noise_toggle.isChecked():
+            self._noise_toggle.setText("🔇 Hiding reactions")
+        else:
+            self._noise_toggle.setText("🔊 Showing everything")
+
     def _on_concept_clicked(self, term: str) -> None:
         """Glossary chip click routes based on the active tab.
 
@@ -431,37 +469,23 @@ class MainWindow(QMainWindow):
         self._image_viewer.show_image(path)
 
     def _on_citation(self, kind: str, raw_id: str) -> None:
-        """Ask-Tom citation click → jump to source."""
+        """Ask-Tom citation click → open a popover showing the content.
+        From there the user can hit 'Show in timeline' if they want the
+        surrounding feed context — otherwise they stay on the Ask Tom tab.
+        """
+        if self._detail_dialog is None:
+            self._detail_dialog = DetailDialog(self._conn, self)
+            self._detail_dialog.jump_to_message.connect(self._jump_to_message)
+            self._detail_dialog.open_image.connect(self._open_image_viewer)
+
         if kind == "msg":
-            self._jump_to_message(raw_id)
+            self._detail_dialog.show_message(raw_id)
         elif kind == "doc":
-            # doc:<page_id> — look up the page and show its content / rendered PNG
             try:
                 page_id = int(raw_id)
             except ValueError:
                 return
-            row = self._conn.execute(
-                """
-                SELECT p.page_num, p.rendered_path,
-                       COALESCE(NULLIF(p.ocr_text,''), p.extracted_text) AS text,
-                       d.title, d.filename
-                  FROM document_pages p JOIN documents d ON d.id = p.document_id
-                 WHERE p.id = ?
-                """,
-                (page_id,),
-            ).fetchone()
-            if not row:
-                QMessageBox.information(self, "Not found", "Couldn't locate that page.")
-                return
-            title = row["title"] or row["filename"] or "Document"
-            snippet = (row["text"] or "").strip()
-            if len(snippet) > 2000:
-                snippet = snippet[:1997] + "…"
-            QMessageBox.information(
-                self,
-                f"{title} · page {row['page_num']}",
-                snippet or "(no text on this page)",
-            )
+            self._detail_dialog.show_doc_page(page_id)
 
     def _jump_to_message(self, message_id: str) -> None:
         # Clear search & switch to Feed, then try to scroll to the message.

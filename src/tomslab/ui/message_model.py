@@ -15,10 +15,34 @@ from typing import Any, Optional
 
 from PyQt6.QtCore import QAbstractListModel, QModelIndex, Qt
 
+from tomslab import db as dbmod
 from tomslab import search as searchmod
 from tomslab import semantic as semanticmod
 from tomslab import visual as visualmod
 from tomslab.search import SearchMode
+
+
+# Shared "non-noise" SQL fragment. A message is kept if ANY of these hold:
+#   * it's from Tom (featured speaker)                           -> always kept
+#   * it has at least one attachment                             -> charts always kept
+#   * its trimmed text is >= 12 chars AND contains a letter      -> substantive
+# This kills: single emoji replies ("👍"), one-token reactions ("lol", "ok",
+# "yep", "nice"), pure punctuation / price-only numerics, etc.
+NOISE_FILTER_SQL = """(
+  m.is_featured_speaker = 1
+  OR EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = m.id)
+  OR (
+    LENGTH(TRIM(COALESCE(m.content,''))) >= 12
+    AND m.content GLOB '*[A-Za-z]*'
+    AND LOWER(TRIM(m.content)) NOT IN (
+      'ok','okay','kk','yes','yep','yup','no','nope','nice','great',
+      'thanks','thank you','thx','sure','true','correct','right','gotcha',
+      'cheers','welcome','yw','np','lol','lolol','haha','hahaha','lmao',
+      'lmaoo','rofl','fr','boom','fire','wow','nope.','yup.','right.',
+      'correct.','indeed','agreed','same','ditto','bump','this','facts'
+    )
+  )
+)"""
 
 
 def _synthesize_doc_row(r: sqlite3.Row) -> "MessageRow":
@@ -118,7 +142,20 @@ class MessageListModel(QAbstractListModel):
         self._search_ids: list[str] = []   # pre-resolved typed IDs in search mode
         self._mixed_hits: list = []        # MixedSemanticHit for semantic mode
         self._last_error: str = ""
+        self._hide_noise: bool = (
+            dbmod.get_setting(conn, "hide_feed_noise", "1") == "1"
+        )
         self.reload()
+
+    def set_hide_noise(self, hide: bool) -> None:
+        if hide == self._hide_noise:
+            return
+        self._hide_noise = hide
+        dbmod.set_setting(self._conn, "hide_feed_noise", "1" if hide else "0")
+        self.reload()
+
+    def hide_noise(self) -> bool:
+        return self._hide_noise
 
     # ------------------------------------------------------------------
     # public API
@@ -157,6 +194,10 @@ class MessageListModel(QAbstractListModel):
         self._total_full = 0
         self._last_error = ""
 
+        # Note: the noise filter below only applies to BROWSE mode. For
+        # SEARCH modes, the search layer already filters out trivially-short
+        # rows (see search.MIN_CONTENT_LEN_FOR_SEARCH). Applying a second
+        # filter would suppress results users explicitly asked for.
         if self._query:
             if self._mode == SearchMode.SEMANTIC:
                 try:
@@ -189,7 +230,13 @@ class MessageListModel(QAbstractListModel):
                 )
             self._total = len(self._search_ids)
         else:
-            row = self._conn.execute("SELECT COUNT(*) AS n FROM messages").fetchone()
+            # Browse mode. Respect the noise filter when active.
+            if self._hide_noise:
+                row = self._conn.execute(
+                    f"SELECT COUNT(*) AS n FROM messages m WHERE {NOISE_FILTER_SQL}"
+                ).fetchone()
+            else:
+                row = self._conn.execute("SELECT COUNT(*) AS n FROM messages").fetchone()
             total = int(row["n"] or 0)
             self._total_full = total
             self._total = min(total, MAX_BROWSE_ROWS)
@@ -330,8 +377,9 @@ class MessageListModel(QAbstractListModel):
         return out
 
     def _fetch_browse(self, offset: int, limit: int) -> list[MessageRow]:
+        where = f"WHERE {NOISE_FILTER_SQL}" if self._hide_noise else ""
         rows = self._conn.execute(
-            """
+            f"""
             SELECT m.id, m.author_name, m.author_nickname, m.timestamp, m.content,
                    m.is_featured_speaker, m.is_pinned, m.reply_to_message_id AS reply_id,
                    parent.author_nickname AS reply_author_nick,
@@ -339,6 +387,7 @@ class MessageListModel(QAbstractListModel):
                    SUBSTR(COALESCE(parent.content, ''), 1, 140) AS reply_snippet
               FROM messages m
               LEFT JOIN messages parent ON parent.id = m.reply_to_message_id
+             {where}
              ORDER BY m.timestamp DESC, m.id DESC
              LIMIT ? OFFSET ?
             """,

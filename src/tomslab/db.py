@@ -259,6 +259,10 @@ DEFAULT_SETTINGS: dict[str, str] = {
     # easyocr: fast, local, classical CV. ollama: LLaVA (tends to describe,
     # not transcribe — avoid for OCR). gemini: rate-limited on free tier.
     "ocr_provider": "easyocr",
+    # Feed noise filter — hides reactions, one-word replies ("lol", "ok"),
+    # emoji-only messages, etc. Tom's own messages and messages with
+    # attachments are always kept. Toggle via the header button.
+    "hide_feed_noise": "1",
     "schema_version": "1",
 }
 

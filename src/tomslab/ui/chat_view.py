@@ -262,7 +262,8 @@ class ChatView(QWidget):
         )
 
     def _render_assistant(self, text: str) -> str:
-        body = self._linkify_citations(text)
+        labels = self._resolve_citation_labels(text)
+        body = self._linkify_citations(text, labels)
         avatar = self._avatar_html("T", COLOR_AUTHOR_TOM)
         return (
             '<div style="margin: 18px 0 10px 0;">'
@@ -277,8 +278,14 @@ class ChatView(QWidget):
         )
 
     @staticmethod
-    def _linkify_citations(text: str) -> str:
-        """Turn [msg:ID] and [doc:ID] into HTML anchors. Escapes the rest."""
+    def _linkify_citations(text: str, labels: dict[str, str] | None = None) -> str:
+        """Turn [msg:ID] and [doc:ID] into HTML anchors with friendly labels.
+
+        ``labels`` maps the raw "msg:123"/"doc:42" key to a human label
+        like "Tom B · May 2023" or "AMT · p46". The ID is still encoded
+        in the anchor href so clicks route correctly.
+        """
+        labels = labels or {}
         out: list[str] = []
         last_end = 0
         for m in CITATION_RE.finditer(text or ""):
@@ -286,18 +293,86 @@ class ChatView(QWidget):
             if start > last_end:
                 out.append(html.escape(text[last_end:start]))
             kind, raw = m.group(1), m.group(2)
-            label = html.escape(f"[{kind}:{raw}]")
             href = f"{kind}:{raw}"
+            # Friendly label with fallback to short "msg"/"doc" if unresolved.
+            friendly = labels.get(href)
+            if not friendly:
+                friendly = "msg" if kind == "msg" else "doc"
+            label = html.escape(friendly)
             out.append(
                 f'<a href="{html.escape(href)}" '
                 f'style="color: {COLOR_AUTHOR_TOM}; text-decoration: none; '
-                f'background: rgba(255,200,87,0.12); padding: 1px 5px;'
-                f' border-radius: 3px; font-weight: 500;">{label}</a>'
+                f'background: rgba(255,200,87,0.12); padding: 1px 6px;'
+                f' border-radius: 4px; font-weight: 500;">{label}</a>'
             )
             last_end = end
         if last_end < len(text):
             out.append(html.escape(text[last_end:]))
         return "".join(out)
+
+    def _resolve_citation_labels(self, text: str) -> dict[str, str]:
+        """Look up nicer display labels for every [msg:…]/[doc:…] in ``text``.
+
+        Message ids → "Author · Mon YYYY".  Doc page ids → "<short-title> · pN".
+        Returns a map from the full "kind:raw" citation key to a friendly
+        string; unknown ids silently drop out and get the generic "msg"/"doc"
+        fallback in :meth:`_linkify_citations`.
+        """
+        msg_ids: set[str] = set()
+        doc_ids: set[str] = set()
+        for m in CITATION_RE.finditer(text or ""):
+            kind, raw = m.group(1), m.group(2)
+            if kind == "msg":
+                msg_ids.add(raw)
+            elif kind == "doc":
+                doc_ids.add(raw)
+
+        out: dict[str, str] = {}
+
+        # ---- messages ----------------------------------------------------
+        if msg_ids:
+            placeholders = ",".join("?" * len(msg_ids))
+            rows = self._conn.execute(
+                f"""
+                SELECT id, author_nickname, author_name, timestamp
+                  FROM messages WHERE id IN ({placeholders})
+                """,
+                list(msg_ids),
+            ).fetchall()
+            for r in rows:
+                nick = r["author_nickname"] or r["author_name"] or "?"
+                nick = nick.strip()
+                if len(nick) > 18:
+                    nick = nick[:16] + "…"
+                ts = (r["timestamp"] or "")
+                date = _fmt_short_ts(ts)
+                label = f"{nick} · {date}" if date else nick
+                out[f"msg:{r['id']}"] = label
+
+        # ---- doc pages --------------------------------------------------
+        if doc_ids:
+            try:
+                int_ids = [int(x) for x in doc_ids]
+            except ValueError:
+                int_ids = []
+            if int_ids:
+                placeholders = ",".join("?" * len(int_ids))
+                rows = self._conn.execute(
+                    f"""
+                    SELECT p.id AS pid, p.page_num AS pnum,
+                           d.title AS title, d.filename AS fn
+                      FROM document_pages p
+                      JOIN documents d ON d.id = p.document_id
+                     WHERE p.id IN ({placeholders})
+                    """,
+                    int_ids,
+                ).fetchall()
+                for r in rows:
+                    title = r["title"] or (r["fn"] or "doc")
+                    title = _short_doc_title(title)
+                    out[f"doc:{int(r['pid'])}"] = f"{title} · p{int(r['pnum'])}"
+
+        return out
 
     # ------------------------------------------------------------------
     # Did-you-mean banner
@@ -419,6 +494,52 @@ class ChatView(QWidget):
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+_MONTHS_SHORT = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                 "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def _fmt_short_ts(iso_ts: str) -> str:
+    """'2023-05-08T15:30:00-04:00' -> 'May 2023'. Returns '' on bad input."""
+    if not iso_ts:
+        return ""
+    try:
+        y = int(iso_ts[:4])
+        m = int(iso_ts[5:7])
+        return f"{_MONTHS_SHORT[m - 1]} {y}"
+    except Exception:
+        return iso_ts[:7]
+
+
+def _short_doc_title(title: str) -> str:
+    """Compress long PDF titles into citation-pill-sized strings."""
+    t = (title or "").strip()
+    # Tom's glossary PDFs — use the acronym or core name.
+    aliases = {
+        "TomB's 60 Structured Trades": "60 Trades",
+        "60 Structured Trades": "60 Trades",
+        "Mean Reversion Structured Trade": "Mean Reversion",
+        "Opening Context Alignment": "Opening Ctx",
+        "Market Structure": "Market Struct",
+        "Auction Market Theory-101": "AMT",
+        "Auction Market Theory": "AMT",
+        "Trader Lab Glossary": "Glossary",
+        "Trader_Lab_Glossary": "Glossary",
+        "Toms Bookmap Settings": "BM Settings",
+        "Toms_Bookmap_Settings": "BM Settings",
+        "Stats by Target": "Stats",
+    }
+    if t in aliases:
+        return aliases[t]
+    # third-party books — strip author and subtitle noise
+    if t.startswith("Best Loser Wins"):
+        return "Hougaard"
+    if t.startswith("Trade Your Way"):
+        return "Tharp"
+    # generic: keep first 3 words, cap at 22 chars
+    short = " ".join(t.split()[:3])
+    return short[:22] + ("…" if len(short) > 22 else "")
+
+
 def _friendly_error(err: str) -> str:
     """Transform a raw exception string into something a PM wants to see."""
     low = (err or "").lower()
