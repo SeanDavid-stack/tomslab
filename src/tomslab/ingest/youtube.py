@@ -42,6 +42,11 @@ try:
 except ImportError:  # pragma: no cover
     WhisperModel = None
 
+try:
+    from pytubefix import YouTube as _PTFYouTube
+except ImportError:  # pragma: no cover
+    _PTFYouTube = None
+
 
 ProgressFn = Callable[[str, int, int], None]   # (stage, current, total)
 
@@ -57,6 +62,25 @@ def videos_dir() -> Path:
 
 def audio_path_for(video_id: str) -> Path:
     return videos_dir() / f"{video_id}.mp3"
+
+
+def youtube_token_path() -> Path:
+    """Where pytubefix's OAuth token cache lives. A single file shared by
+    all ingest workers in the app."""
+    return data_dir() / "youtube_oauth_tokens.json"
+
+
+def is_signed_in() -> bool:
+    """True if a usable OAuth token cache exists."""
+    p = youtube_token_path()
+    try:
+        return p.exists() and p.stat().st_size > 20
+    except OSError:
+        return False
+
+
+class YouTubeNotSignedInError(RuntimeError):
+    """Raised when ingest is attempted without a cached OAuth token."""
 
 
 def _ffmpeg_path() -> str:
@@ -235,178 +259,83 @@ def upsert_video_rows(conn: sqlite3.Connection, entries: list[VideoEntry]) -> in
 
 
 # ---------------------------------------------------------------------------
-# audio download
+# audio download (pytubefix + OAuth)
 # ---------------------------------------------------------------------------
-def _yt_common_opts(browser: str | None) -> dict:
-    """Options common to both enumerate + download calls.
+# Why pytubefix instead of yt-dlp: YouTube's 2026 bot-gate (n-challenge +
+# PO tokens) locked out yt-dlp's anonymous and cookie-based paths for this
+# channel. pytubefix supports Google's OAuth device flow, which signs in
+# once with the user's account, caches a long-lived refresh token, and is
+# treated as a first-class authenticated session by YouTube — fully
+# bypassing the bot gate. The token file lives at ``youtube_token_path()``
+# and is written on first sign-in via the UI's "Sign in to YouTube" action.
 
-    Note: callers that *download* must set ``ignoreerrors=False`` so that
-    yt-dlp actually raises on format/auth failures instead of silently
-    returning None — otherwise retry loops can't detect the failure.
-    """
-    opts: dict = {
-        "quiet": True,
-        "no_warnings": True,
-        "ignoreerrors": True,
-        "ffmpeg_location": _ffmpeg_path(),
-    }
-    if browser:
-        opts["cookiesfrombrowser"] = (browser.lower(),)
-    return opts
-
-
-class CookieDecryptError(RuntimeError):
-    """Raised when yt-dlp can't decrypt the selected browser's cookies.
-
-    On current Chrome (version 127+, Aug 2024 onward) Windows uses
-    App-Bound Encryption for cookies and yt-dlp can't unwrap them.
-    Firefox, Edge, and Brave aren't affected — switch via the
-    ``youtube_browser_cookies`` setting.
-    """
+def _convert_to_mp3(src: Path, bitrate_kbps: int) -> Path:
+    """Run ffmpeg to strip video + transcode to low-bitrate MP3.
+    Deletes the source file after a successful convert."""
+    import subprocess
+    tgt = src.with_suffix(".mp3")
+    subprocess.run(
+        [_ffmpeg_path(), "-y", "-i", str(src),
+         "-vn", "-c:a", "libmp3lame", "-b:a", f"{bitrate_kbps}k",
+         str(tgt)],
+        check=True, capture_output=True,
+    )
+    src.unlink(missing_ok=True)
+    return tgt
 
 
-def download_audio(
-    video_id: str,
-    bitrate_kbps: int = 96,
-    browser: str | None = "chrome",
-) -> Path:
+def download_audio(video_id: str, bitrate_kbps: int = 96) -> Path:
     """Download a single video's audio as a low-bitrate MP3 into videos_dir.
-    Resumable: if the target MP3 already exists, return it unchanged.
 
-    ``browser`` is passed through to yt-dlp's ``cookiesfrombrowser`` option
-    so YouTube's bot-gate sees a logged-in session. Pass None to attempt
-    an anonymous download (usually fails on current YouTube).
+    Uses pytubefix with a cached OAuth token. Call ``is_signed_in()`` first
+    in the UI flow; if it returns False, route the user through the
+    "Sign in to YouTube" menu action before attempting any ingest.
+
+    Resumable — if the target MP3 already exists and is non-empty, returns
+    it unchanged without touching the network.
     """
-    if yt_dlp is None:
-        raise RuntimeError("yt-dlp not installed")
+    if _PTFYouTube is None:
+        raise RuntimeError("pytubefix not installed")
     out = audio_path_for(video_id)
     if out.exists() and out.stat().st_size > 1024:
         return out
+    if not is_signed_in():
+        raise YouTubeNotSignedInError(
+            "No YouTube OAuth token cached. Use File → Sign in to YouTube "
+            "(one-time) before starting an ingest."
+        )
 
-    tmp_template = str(videos_dir() / (video_id + ".%(ext)s"))
     url = f"https://www.youtube.com/watch?v={video_id}"
-
-    # Format-selector chain. Live-stream archives on YouTube sometimes
-    # don't expose a pure audio-only format — only combined video+audio
-    # streams. Start strict (audio only, saves bandwidth) and fall back
-    # progressively looser. The FFmpeg postprocessor strips video and
-    # outputs MP3 regardless of input format.
-    format_chain = [
-        "bestaudio/best",
-        "bestaudio[ext=m4a]/bestaudio[ext=webm]/best",
-        "best",
-    ]
-
-    # YouTube's "n challenge" (obfuscated signature) defeats the default
-    # web client when the JS solver can't run. Falling back to alternate
-    # player clients bypasses the challenge entirely on most videos.
-    client_chain = [
-        None,                      # default (web)
-        ("android",),
-        ("ios",),
-        ("tv_embedded", "web_embedded"),
-        ("mweb",),
-    ]
-
-    log.info("Downloading audio for %s (cookies=%s)", video_id, browser or "none")
-    last_exc: Exception | None = None
-    produced: Path | None = None
-    for clients in client_chain:
-        if produced is not None:
-            break
-        # Mobile-app clients (android, ios) don't accept cookies — yt-dlp
-        # refuses to use them when `cookiesfrombrowser` is set and falls
-        # back to web, which defeats the purpose. Strip cookies for any
-        # non-web client chain.
-        uses_cookies = clients is None or any(
-            c.startswith("web") or c == "mweb" for c in clients
+    log.info("Downloading audio for %s (pytubefix/oauth)", video_id)
+    try:
+        yt = _PTFYouTube(
+            url,
+            use_oauth=True,
+            allow_oauth_cache=True,
+            token_file=str(youtube_token_path()),
         )
-        effective_browser = browser if uses_cookies else None
-        for i, fmt in enumerate(format_chain):
-            opts = _yt_common_opts(effective_browser)
-            opts.update({
-                "format": fmt,
-                "outtmpl": tmp_template,
-                "ignoreerrors": False,
-                "no_warnings": False,
-                "postprocessors": [{
-                    "key": "FFmpegExtractAudio",
-                    "preferredcodec": "mp3",
-                    "preferredquality": str(bitrate_kbps),
-                }],
-            })
-            if clients is not None:
-                opts["extractor_args"] = {
-                    "youtube": {"player_client": list(clients)}
-                }
-            try:
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    ydl.extract_info(url, download=True)
-            except Exception as exc:
-                msg = str(exc)
-                last_exc = exc
-                cookie_fail_markers = (
-                    "DPAPI",
-                    "Failed to decrypt",
-                    "failed to load cookies",
-                    "Could not copy",        # Chrome DB locked (Chrome running)
-                    "could not find cookie",
-                    "cookie database",
-                )
-                if any(m in msg for m in cookie_fail_markers):
-                    raise CookieDecryptError(
-                        f"Can't read {browser or 'browser'} cookies. Either "
-                        f"the browser is running and holding the DB lock, or "
-                        f"Chrome 127+ App-Bound Encryption is in play. Falling "
-                        f"back to another browser."
-                    ) from exc
-                if "Requested format is not available" in msg:
-                    if i + 1 < len(format_chain):
-                        continue
-                    break   # try next client
-                raise
-
-            # Check for a real output file (yt-dlp may have swallowed errors
-            # and returned None instead of raising).
-            for cand in videos_dir().glob(f"{video_id}.*"):
-                if cand.is_file() and cand.stat().st_size > 1024:
-                    produced = cand
-                    break
-            if produced is not None:
-                break
-            if i + 1 < len(format_chain):
-                continue
-        if produced is None:
-            log.info(
-                "player_client %s produced no file for %s — trying next client",
-                clients or "web", video_id,
+        stream = (
+            yt.streams
+              .filter(only_audio=True)
+              .order_by("abr")
+              .desc()
+              .first()
+        )
+        if stream is None:
+            raise RuntimeError(
+                f"no audio stream available for {video_id} (video may be "
+                f"members-only, geo-blocked, or deleted)"
             )
-    if produced is None and last_exc is not None:
-        raise RuntimeError(
-            f"no format/client combination worked for {video_id}: {last_exc}. "
-            f"YouTube's bot-gate may have tightened — try `pip install -U yt-dlp`."
-        )
-    if not out.exists():
-        for cand in videos_dir().glob(f"{video_id}.*"):
-            if cand.suffix.lower() == ".mp3":
-                return cand
-        # Sometimes the postprocessor leaves a .webm / .m4a if ffmpeg hiccups.
-        # Convert manually as a last resort.
-        for cand in videos_dir().glob(f"{video_id}.*"):
-            if cand.suffix.lower() in (".webm", ".m4a", ".opus", ".mp4", ".mkv"):
-                log.info("Post-hoc converting %s → mp3", cand.name)
-                import subprocess
-                tgt = cand.with_suffix(".mp3")
-                subprocess.run(
-                    [_ffmpeg_path(), "-y", "-i", str(cand),
-                     "-vn", "-c:a", "libmp3lame", "-b:a", f"{bitrate_kbps}k",
-                     str(tgt)],
-                    check=True, capture_output=True,
-                )
-                cand.unlink(missing_ok=True)
-                return tgt
-        raise RuntimeError(f"audio download for {video_id} produced no .mp3")
-    return out
+        raw = Path(stream.download(
+            output_path=str(videos_dir()),
+            filename=f"{video_id}.{stream.subtype}",
+        ))
+    except Exception as exc:
+        raise RuntimeError(f"pytubefix download failed for {video_id}: {exc}") from exc
+
+    if raw.suffix.lower() == ".mp3":
+        return raw
+    return _convert_to_mp3(raw, bitrate_kbps)
 
 
 # ---------------------------------------------------------------------------
@@ -523,7 +452,6 @@ def ingest_single_video(
     video_id: str,
     model_name: str = "large-v3",
     bitrate_kbps: int = 96,
-    browser: str | None = None,
 ) -> dict:
     """Download + transcribe + chunk one video. Resumable — skip phases that
     are already done (checks file existence + DB state). Returns a small
@@ -536,43 +464,10 @@ def ingest_single_video(
         raise RuntimeError(f"video {video_id} not enumerated — run the "
                            "channel scraper first, or insert it manually")
 
-    # 1) audio — try the configured browser first; on the Chrome-DPAPI
-    # failure automatically fall through to other installed browsers
-    # before giving up.
+    # 1) audio via pytubefix + OAuth (cached token)
     audio = audio_path_for(video_id)
     if not audio.exists():
-        if browser is None:
-            browser = (
-                dbmod.get_setting(conn, "youtube_browser_cookies", "chrome")
-                or "chrome"
-            )
-        tried: list[str] = []
-        last_exc: Exception | None = None
-        # Retry chain: primary, then sensible fallbacks that avoid DPAPI.
-        order = [browser] + [b for b in ("firefox", "edge", "brave")
-                              if b != browser.lower()]
-        for b in order:
-            try:
-                audio = download_audio(
-                    video_id, bitrate_kbps=bitrate_kbps, browser=b
-                )
-                if b != browser:
-                    # Promote the one that actually worked so later videos
-                    # skip the dead branch.
-                    dbmod.set_setting(conn, "youtube_browser_cookies", b)
-                    log.info("Switched youtube_browser_cookies to %s "
-                             "(primary %s failed)", b, browser)
-                break
-            except CookieDecryptError as exc:
-                tried.append(b)
-                last_exc = exc
-                continue
-        else:
-            raise RuntimeError(
-                f"Couldn't read cookies from any of: {', '.join(tried)}. "
-                f"Install/login to one of those browsers or set "
-                f"youtube_browser_cookies manually. Last error: {last_exc}"
-            )
+        audio = download_audio(video_id, bitrate_kbps=bitrate_kbps)
     conn.execute(
         "UPDATE videos SET audio_path = ?, transcript_status = 'downloaded' "
         "WHERE id = ?",

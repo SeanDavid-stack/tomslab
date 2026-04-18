@@ -153,6 +153,10 @@ class MainWindow(QMainWindow):
         self._build_image_embed_action.triggered.connect(self._on_build_image_embeddings)
         file_menu.addAction(self._build_image_embed_action)
 
+        self._signin_youtube_action = QAction("&Sign in to YouTube (one-time)…", self)
+        self._signin_youtube_action.triggered.connect(self._on_signin_youtube)
+        file_menu.addAction(self._signin_youtube_action)
+
         self._ingest_youtube_action = QAction("Import &YouTube (TomTube)…", self)
         self._ingest_youtube_action.triggered.connect(self._on_ingest_youtube)
         file_menu.addAction(self._ingest_youtube_action)
@@ -917,16 +921,50 @@ class MainWindow(QMainWindow):
             self._refresh_status()
             return
 
+        if not self._ensure_youtube_signed_in():
+            self._refresh_status()
+            return
         # Commit the new rows as 'pending' and kick off the worker — it will
         # only process pending/failed rows, so the full re-enumeration that
         # `_on_ingest_youtube` does isn't needed.
         upsert_video_rows(self._conn, new)
         self._on_ingest_youtube_start(f"{len(new)} new video(s)")
 
+    def _on_signin_youtube(self) -> None:
+        from tomslab.ui.youtube_oauth import run_oauth_flow
+        ok = run_oauth_flow(self)
+        if ok:
+            QMessageBox.information(
+                self, "Signed in",
+                "YouTube sign-in complete. You can now use "
+                "File → Import YouTube (TomTube)…",
+            )
+
+    def _ensure_youtube_signed_in(self) -> bool:
+        """Gate TomTube ingest on a cached OAuth token. Returns True if the
+        caller should proceed."""
+        from tomslab.ingest.youtube import is_signed_in
+        if is_signed_in():
+            return True
+        reply = QMessageBox.question(
+            self,
+            "Sign in to YouTube",
+            "TomTube needs a one-time YouTube sign-in before it can "
+            "download videos. Sign in now?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return False
+        from tomslab.ui.youtube_oauth import run_oauth_flow
+        return run_oauth_flow(self)
+
     def _on_ingest_youtube(self) -> None:
         if self._video_worker is not None and self._video_worker.isRunning():
             QMessageBox.information(self, "Already running",
                                     "A YouTube ingest is already in progress.")
+            return
+        if not self._ensure_youtube_signed_in():
             return
         reply = QMessageBox.question(
             self,
@@ -938,10 +976,10 @@ class MainWindow(QMainWindow):
             "<li>Transcribe locally with faster-whisper on your GPU (~10× realtime)</li>"
             "<li>Chunk the transcripts and embed them for Ask Tom</li>"
             "</ul>"
-            "<p>It uses your logged-in Chrome session cookies to bypass "
-            "YouTube's bot gate. <b>Expect this to run for hours</b> — "
-            "the pipeline is resumable, so you can close the app and it "
-            "picks up where it left off next time.</p>"
+            "<p>Uses your cached Google OAuth token to bypass YouTube's "
+            "bot gate. <b>Expect this to run for hours</b> — the pipeline "
+            "is resumable, so you can close the app and it picks up where "
+            "it left off next time.</p>"
             "<p><b>Proceed?</b></p>",
             QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Ok,
