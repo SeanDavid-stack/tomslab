@@ -320,9 +320,13 @@ class MainWindow(QMainWindow):
         self._docs = DocsView(self._conn, self)
         self._docs.page_opened.connect(self._open_image_viewer)
 
-        self._tabs.addTab(self._list, "Feed")
-        self._tabs.addTab(self._gallery, "Gallery")
+        # Tab order — most-used surfaces first. Ask Tom is where people
+        # actually go; Gallery is the fast visual scan; Feed is raw-read
+        # when you need a specific conversation; Docs is reference; Bookmarks
+        # is where saved stuff lives.
         self._tabs.addTab(self._chat, "Ask Tom")
+        self._tabs.addTab(self._gallery, "Gallery")
+        self._tabs.addTab(self._list, "Feed")
         self._tabs.addTab(self._docs, "Docs")
         self._tabs.addTab(self._bookmarks, "Bookmarks")
         self._tabs.currentChanged.connect(self._on_tab_changed)
@@ -415,7 +419,7 @@ class MainWindow(QMainWindow):
             return
         # Automatically flip to Gallery tab for visual queries — it's the natural view.
         if mode == SearchMode.VISUAL:
-            self._tabs.setCurrentIndex(1)
+            self._tabs.setCurrentWidget(self._gallery)
         if self._search.text().strip():
             self._apply_search()
 
@@ -444,8 +448,7 @@ class MainWindow(QMainWindow):
           * Ask Tom: drop the term in the chat composer so the user can ask
             a question about it without leaving the chat.
         """
-        current = self._tabs.currentIndex()
-        if current == 2:   # Ask Tom
+        if self._tabs.currentWidget() is self._chat:
             # Don't clobber if the composer already has an in-progress draft.
             existing = self._chat._input.toPlainText().strip()
             if existing:
@@ -465,17 +468,17 @@ class MainWindow(QMainWindow):
         self._search.setText(term)
         self._apply_search()
 
-    def _on_tab_changed(self, idx: int) -> None:
-        # When user switches to Gallery manually, make sure it reflects current query.
-        if idx == 1:
+    def _on_tab_changed(self, _idx: int) -> None:
+        cur = self._tabs.currentWidget()
+        if cur is self._gallery:
             mode_str = self._mode_combo.currentData() or "keyword"
             if mode_str == "visual":
                 self._gallery.set_query(self._search.text().strip())
             else:
                 self._gallery.set_query("")
-        elif idx == 3:   # Docs tab
+        elif cur is self._docs:
             self._docs.reload()
-        elif idx == 4:   # Bookmarks tab
+        elif cur is self._bookmarks:
             self._bookmarks.reload()
         self._refresh_status()
 
@@ -488,7 +491,7 @@ class MainWindow(QMainWindow):
         # Repaint only the affected area.
         self._list.viewport().update()
         # If the Bookmarks tab is currently visible, refresh it.
-        if self._tabs.currentIndex() == 3:
+        if self._tabs.currentWidget() is self._bookmarks:
             self._bookmarks.reload()
 
     # ------------------------------------------------------------------
@@ -533,7 +536,7 @@ class MainWindow(QMainWindow):
         self._search.blockSignals(False)
         self._revert_mode_to("keyword")
         self._model.set_query("", mode=SearchMode.KEYWORD)
-        self._tabs.setCurrentIndex(0)
+        self._tabs.setCurrentWidget(self._list)
 
         # Scan loaded pages for the message; fetch more if needed.
         target = self._find_row(message_id, load_pages=40)
