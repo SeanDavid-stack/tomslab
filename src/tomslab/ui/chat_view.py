@@ -719,27 +719,38 @@ def _short_doc_title(title: str) -> str:
 
 
 def _friendly_error(err: str) -> str:
-    """Transform a raw exception string into something a PM wants to see."""
+    """Transform a raw exception string into something a PM wants to see.
+
+    Ordering matters — match the *specific* conditions first (auth, rate
+    limit, service outage) before the generic provider-name matches.
+    """
     low = (err or "").lower()
-    if "503" in err or "unavailable" in low:
+    # Authentication / key problems — most specific.
+    if "no gemini api key" in low or "unauthorized" in low or " 401" in low:
         return (
-            "**Gemini is overloaded right now.** Google's free tier sometimes "
-            "returns this during spikes. Give it 10–30 seconds and try again — "
-            "your question will retrieve the same context on retry."
+            "**No Gemini API key configured, or the key is invalid.** Open "
+            "File → Settings → AI Providers and paste a key from "
+            "https://aistudio.google.com/app/apikey."
         )
-    if "429" in err or "resource_exhausted" in low:
+    # Rate-limit / quota.
+    if " 429" in err or "resource_exhausted" in low or "rate limit" in low:
         return (
-            "**Gemini free-tier rate limit reached.** Wait a minute and "
-            "retry, or add billing at console.cloud.google.com for higher limits."
+            "**Free-tier rate limit reached.** Wait a minute and retry, "
+            "or add billing at console.cloud.google.com for higher limits."
         )
-    if "no Gemini API key" in err or "api key" in low:
+    # Gemini / Google overload.
+    if " 503" in err or "unavailable" in low:
         return (
-            "**No Gemini API key configured.** Open File → Settings → AI "
-            "Providers and paste a key from https://aistudio.google.com/app/apikey."
+            "**The chat model is overloaded right now.** Free-tier spikes "
+            "usually clear in 10–30 seconds — try again."
         )
-    if "ollama" in low:
+    # Ollama truly unreachable (daemon down / refused).
+    if "connection refused" in low or "connecterror" in low or "timed out" in low:
         return (
-            "**Ollama is unreachable.** Make sure the Ollama app is running, "
-            "then try again."
+            "**Chat backend didn't respond in time.** If your chat provider "
+            "is Ollama, make sure the Ollama app is running. If it's Gemini, "
+            "your network may be slow right now — try again."
         )
-    return f"Error: {err}"
+    # Provider name in the message but we didn't match a specific code —
+    # show the raw message so we can actually debug it.
+    return f"Chat failed: {err}"
