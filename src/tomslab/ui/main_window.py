@@ -543,7 +543,14 @@ class MainWindow(QMainWindow):
             self._detail_dialog.show_doc_page(page_id)
 
     def _jump_to_message(self, message_id: str) -> None:
-        # Clear search & switch to Feed, then try to scroll to the message.
+        """Switch to Feed and scroll to a specific Discord message.
+
+        Uses an O(1) SQL rank lookup rather than iterating loaded pages,
+        so jumping to a message from 2021 is as fast as jumping to
+        yesterday's. Loads pages up to that rank lazily and scrolls.
+        """
+        from PyQt6.QtCore import QModelIndex, QTimer
+
         self._search.blockSignals(True)
         self._search.setText("")
         self._search.blockSignals(False)
@@ -551,38 +558,74 @@ class MainWindow(QMainWindow):
         self._model.set_query("", mode=SearchMode.KEYWORD)
         self._tabs.setCurrentWidget(self._list)
 
-        # Scan loaded pages for the message; fetch more if needed.
-        target = self._find_row(message_id, load_pages=40)
-        if target is not None:
-            self._list.scrollTo(
-                self._model.index(target, 0),
-                hint=QListView.ScrollHint.PositionAtCenter,
-            )
-            self._list.setCurrentIndex(self._model.index(target, 0))
-            # Pulse the target gold for ~2s so the user sees where they landed.
-            self._delegate.flash_message(message_id)
-            self._list.viewport().update()
-            # Schedule a repaint when the flash window elapses to clear it.
-            from PyQt6.QtCore import QTimer
-            QTimer.singleShot(2300, self._clear_flash)
-        else:
-            # Fall back to a modal dialog with the message's content.
+        try:
+            rank = self._rank_of_message(message_id)
+        except Exception as exc:
+            log.warning("rank lookup failed for %s: %s", message_id, exc)
+            rank = None
+
+        if rank is None:
+            # Message isn't in the DB, or the noise filter hid it, or
+            # rank is past the 10K browse cap. Fall back to the popover.
             self._show_message_detail(message_id)
+            return
+
+        # Lazily load model pages until we've covered the target rank or
+        # we run out of data. Bounded to prevent runaway fetches.
+        root = QModelIndex()
+        max_iterations = 60    # at 200 rows/page that's 12K rows = the full cap
+        while (
+            self._model.rowCount() <= rank
+            and self._model.canFetchMore(root)
+            and max_iterations > 0
+        ):
+            self._model.fetchMore(root)
+            max_iterations -= 1
+
+        if rank >= self._model.rowCount():
+            self._show_message_detail(message_id)
+            return
+
+        idx = self._model.index(rank, 0)
+        if not idx.isValid():
+            self._show_message_detail(message_id)
+            return
+
+        self._list.scrollTo(idx, hint=QListView.ScrollHint.PositionAtCenter)
+        self._list.setCurrentIndex(idx)
+        self._delegate.flash_message(message_id)
+        self._list.viewport().update()
+        QTimer.singleShot(2300, self._clear_flash)
+
+    def _rank_of_message(self, message_id: str) -> int | None:
+        """Return the 0-indexed row position of ``message_id`` under the
+        current browse ORDER BY (timestamp DESC, id DESC). Honours the
+        noise filter setting so the rank matches what's actually on screen.
+        """
+        row = self._conn.execute(
+            "SELECT timestamp FROM messages WHERE id = ?", (message_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        ts = row["timestamp"] or ""
+        # Count messages that come BEFORE this one in the ordering.
+        if self._model.hide_noise():
+            from tomslab.ui.message_model import NOISE_FILTER_SQL
+            where = (
+                "(timestamp > ? OR (timestamp = ? AND id > ?))"
+                f" AND {NOISE_FILTER_SQL}"
+            )
+        else:
+            where = "(timestamp > ? OR (timestamp = ? AND id > ?))"
+        count = self._conn.execute(
+            f"SELECT COUNT(*) AS n FROM messages m WHERE {where}",
+            (ts, ts, message_id),
+        ).fetchone()
+        return int(count["n"] or 0)
 
     def _clear_flash(self) -> None:
         self._delegate.clear_flash()
         self._list.viewport().update()
-
-    def _find_row(self, message_id: str, load_pages: int) -> int | None:
-        for _ in range(max(1, load_pages)):
-            for row in range(self._model.rowCount()):
-                msg = self._model.data(self._model.index(row, 0), ROLE_MESSAGE)
-                if msg is not None and getattr(msg, "id", None) == message_id:
-                    return row
-            if not self._model.canFetchMore(self._model.index(-1, -1)):
-                break
-            self._model.fetchMore(self._model.index(-1, -1))
-        return None
 
     def _show_message_detail(self, message_id: str) -> None:
         row = self._conn.execute(
