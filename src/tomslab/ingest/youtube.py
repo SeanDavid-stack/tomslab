@@ -280,36 +280,76 @@ def download_audio(
     out = audio_path_for(video_id)
     if out.exists() and out.stat().st_size > 1024:
         return out
+
     tmp_template = str(videos_dir() / (video_id + ".%(ext)s"))
-    opts = _yt_common_opts(browser)
-    opts.update({
-        "format": "bestaudio/best",
-        "outtmpl": tmp_template,
-        "postprocessors": [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": str(bitrate_kbps),
-        }],
-    })
     url = f"https://www.youtube.com/watch?v={video_id}"
+
+    # Format-selector chain. Live-stream archives on YouTube sometimes
+    # don't expose a pure audio-only format — only combined video+audio
+    # streams. Start strict (audio only, saves bandwidth) and fall back
+    # progressively looser. The FFmpeg postprocessor strips video and
+    # outputs MP3 regardless of input format.
+    format_chain = [
+        "bestaudio/best",           # ideal: audio-only stream
+        "bestaudio[ext=m4a]/bestaudio[ext=webm]/best",
+        "best",                      # fallback: combined, extract audio
+    ]
+
     log.info("Downloading audio for %s (cookies=%s)", video_id, browser or "none")
-    try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            ydl.extract_info(url, download=True)
-    except Exception as exc:
-        msg = str(exc)
-        if "DPAPI" in msg or "Failed to decrypt" in msg or "failed to load cookies" in msg:
-            raise CookieDecryptError(
-                f"Can't read {browser or 'browser'} cookies. Chrome 127+ uses "
-                f"App-Bound Encryption which yt-dlp can't unwrap. Set the "
-                f"youtube_browser_cookies setting to 'firefox', 'edge', or "
-                f"'brave' and retry."
-            ) from exc
-        raise
+    last_exc: Exception | None = None
+    for i, fmt in enumerate(format_chain):
+        opts = _yt_common_opts(browser)
+        opts.update({
+            "format": fmt,
+            "outtmpl": tmp_template,
+            "postprocessors": [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": str(bitrate_kbps),
+            }],
+        })
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.extract_info(url, download=True)
+            break   # success
+        except Exception as exc:
+            msg = str(exc)
+            last_exc = exc
+            if "DPAPI" in msg or "Failed to decrypt" in msg or "failed to load cookies" in msg:
+                raise CookieDecryptError(
+                    f"Can't read {browser or 'browser'} cookies. Chrome 127+ uses "
+                    f"App-Bound Encryption which yt-dlp can't unwrap. Set the "
+                    f"youtube_browser_cookies setting to 'firefox', 'edge', or "
+                    f"'brave' and retry."
+                ) from exc
+            if "Requested format is not available" in msg and i + 1 < len(format_chain):
+                log.info("format %r unavailable for %s — trying next in chain",
+                         fmt, video_id)
+                continue
+            raise
+    else:
+        raise RuntimeError(
+            f"no format in chain worked for {video_id}: {last_exc}"
+        )
     if not out.exists():
         for cand in videos_dir().glob(f"{video_id}.*"):
             if cand.suffix.lower() == ".mp3":
                 return cand
+        # Sometimes the postprocessor leaves a .webm / .m4a if ffmpeg hiccups.
+        # Convert manually as a last resort.
+        for cand in videos_dir().glob(f"{video_id}.*"):
+            if cand.suffix.lower() in (".webm", ".m4a", ".opus", ".mp4", ".mkv"):
+                log.info("Post-hoc converting %s → mp3", cand.name)
+                import subprocess
+                tgt = cand.with_suffix(".mp3")
+                subprocess.run(
+                    [_ffmpeg_path(), "-y", "-i", str(cand),
+                     "-vn", "-c:a", "libmp3lame", "-b:a", f"{bitrate_kbps}k",
+                     str(tgt)],
+                    check=True, capture_output=True,
+                )
+                cand.unlink(missing_ok=True)
+                return tgt
         raise RuntimeError(f"audio download for {video_id} produced no .mp3")
     return out
 
