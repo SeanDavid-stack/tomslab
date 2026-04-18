@@ -165,7 +165,9 @@ class ChatView(QWidget):
         self._last_answer_sources: list = []
         self._worker: ChatWorker | None = None
         self._pending_corrected: str | None = None    # used by the Did-you-mean banner
-        self._attachment_path: str | None = None
+        # Supports multiple attachments per turn (e.g. HTF chart + intraday
+        # Bookmap in the same question).  Added via the paperclip or paste.
+        self._attachment_paths: list[str] = []
 
         self._build_ui()
         self._render_empty_state()
@@ -254,7 +256,7 @@ class ChatView(QWidget):
         self._status.setStyleSheet(f"color: {COLOR_DIM}; padding-left: 24px;")
         outer.addWidget(self._status)
 
-        # --- attachment preview (hidden until a chart is attached) -----
+        # --- attachment preview strip (hidden until any chart is attached) ---
         self._attachment_frame = QFrame()
         self._attachment_frame.setStyleSheet(
             f"QFrame {{ background: {COLOR_BG_ALT}; border: 1px solid {COLOR_BORDER};"
@@ -264,17 +266,15 @@ class ChatView(QWidget):
             f" padding: 2px 8px; border: 1px solid {COLOR_BORDER}; border-radius: 4px; }}"
             f"QPushButton:hover {{ color: {COLOR_TEXT}; }}"
         )
-        ah = QHBoxLayout(self._attachment_frame)
-        ah.setContentsMargins(8, 4, 8, 4)
-        self._attachment_thumb = QLabel()
-        self._attachment_thumb.setFixedSize(56, 40)
-        self._attachment_thumb.setStyleSheet("background: #111; border-radius: 3px;")
+        self._attachment_lay = QHBoxLayout(self._attachment_frame)
+        self._attachment_lay.setContentsMargins(8, 4, 8, 4)
+        self._attachment_lay.setSpacing(8)
         self._attachment_label = QLabel("")
-        self._attachment_clear = QPushButton("Remove")
+        self._attachment_lay.addWidget(self._attachment_label)
+        self._attachment_lay.addStretch(1)
+        self._attachment_clear = QPushButton("Remove all")
         self._attachment_clear.clicked.connect(self._clear_attachment)
-        ah.addWidget(self._attachment_thumb)
-        ah.addWidget(self._attachment_label, stretch=1)
-        ah.addWidget(self._attachment_clear)
+        self._attachment_lay.addWidget(self._attachment_clear)
         self._attachment_frame.setVisible(False)
         outer.addWidget(self._attachment_frame)
 
@@ -589,10 +589,10 @@ class ChatView(QWidget):
     def _submit_now(self, question: str) -> None:
         self._input.clear()
 
-        # Render the user turn with an attachment preview inline so it's
-        # clear the chart went out with the question.
-        if self._attachment_path:
-            display = question + f"\n\n📎 [attached: {Path(self._attachment_path).name}]"
+        # Render the user turn with attachment preview(s) inline.
+        if self._attachment_paths:
+            names = ", ".join(Path(p).name for p in self._attachment_paths)
+            display = question + f"\n\n📎 [attached: {names}]"
         else:
             display = question
         self._history.append(ChatTurn(role="user", content=display))
@@ -600,10 +600,10 @@ class ChatView(QWidget):
         self._set_busy(True)
         self._status.setText("Thinking…")
 
-        attachment = self._attachment_path
+        attachments = list(self._attachment_paths)
         self._worker = ChatWorker(
             question, self._history[:-1],
-            attachment_path=attachment, parent=self,
+            attachment_paths=attachments or None, parent=self,
         )
         self._worker.answered.connect(self._on_answered)
         self._worker.failed.connect(self._on_failed)
@@ -708,57 +708,96 @@ class ChatView(QWidget):
     # attachment handling
     # ------------------------------------------------------------------
     def _on_attach_clicked(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
+        # Multi-select so a user can pick HTF + intraday + Bookmap in one go;
+        # single selections still work.
+        paths, _ = QFileDialog.getOpenFileNames(
             self,
-            "Attach a chart for analysis",
+            "Attach chart(s) for analysis",
             "",
             "Images (*.png *.jpg *.jpeg *.bmp *.webp)",
         )
-        if not path:
-            return
-        self._attachment_path = path
-        pix = QPixmap(path)
-        if pix.isNull():
-            self._attachment_path = None
-            self._attachment_frame.setVisible(False)
-            return
-        thumb = pix.scaled(
-            56, 40,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        self._attachment_thumb.setPixmap(thumb)
-        self._attachment_label.setText(
-            f"Attached: <b>{Path(path).name}</b> "
-            f"<span style='color:{COLOR_DIM};'>· will be sent with your next question</span>"
-        )
-        self._attachment_frame.setVisible(True)
+        for p in paths or []:
+            if p and p not in self._attachment_paths:
+                self._attachment_paths.append(p)
+        self._refresh_attachments_preview()
 
     def _clear_attachment(self) -> None:
-        self._attachment_path = None
-        self._attachment_thumb.clear()
-        self._attachment_label.setText("")
-        self._attachment_frame.setVisible(False)
+        self._attachment_paths = []
+        self._refresh_attachments_preview()
 
     def _on_image_pasted(self, path: str) -> None:
-        """Handler fired when the user pastes a screenshot into the composer."""
-        self._attachment_path = path
-        pix = QPixmap(path)
-        if pix.isNull():
-            self._attachment_path = None
+        """Handler fired when the user pastes a screenshot into the composer.
+
+        Appends to the existing attachment list rather than replacing, so
+        a user can paste HTF first and then paste the intraday Bookmap.
+        """
+        if path and path not in self._attachment_paths:
+            self._attachment_paths.append(path)
+        self._refresh_attachments_preview()
+        if self._attachment_paths:
+            n = len(self._attachment_paths)
+            self._status.setText(
+                f"📋 {n} chart{'s' if n != 1 else ''} ready — Ctrl+Enter to send"
+            )
+
+    def _refresh_attachments_preview(self) -> None:
+        """Re-render the attachment strip so it reflects _attachment_paths.
+
+        Keeps the trailing label + "Remove all" button; the thumbnails
+        between them are rebuilt every time the list changes.
+        """
+        # Remove any existing thumb buttons between index 0 (label) and
+        # the last two items (stretch + Remove-all button).
+        while self._attachment_lay.count() > 3:
+            it = self._attachment_lay.takeAt(1)
+            w = it.widget()
+            if w is not None:
+                w.deleteLater()
+        if not self._attachment_paths:
+            self._attachment_label.setText("")
+            self._attachment_frame.setVisible(False)
             return
-        thumb = pix.scaled(
-            56, 40,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        self._attachment_thumb.setPixmap(thumb)
+        for i, p in enumerate(self._attachment_paths):
+            self._attachment_lay.insertWidget(i + 1, self._make_thumb_button(p))
+        n = len(self._attachment_paths)
         self._attachment_label.setText(
-            f"Pasted chart (<b>{Path(path).name}</b>) "
-            f"<span style='color:{COLOR_DIM};'>· will be sent with your next question</span>"
+            f"<b>{n} chart{'s' if n != 1 else ''}</b> "
+            f"<span style='color:{COLOR_DIM};'>· will be sent together"
+            f"{' (multi-timeframe)' if n > 1 else ''}</span>"
         )
         self._attachment_frame.setVisible(True)
-        self._status.setText("📋 Chart pasted — type your question and Ctrl+Enter to send")
+
+    def _make_thumb_button(self, path: str) -> QPushButton:
+        btn = QPushButton()
+        pix = QPixmap(path)
+        if not pix.isNull():
+            thumb = pix.scaled(
+                56, 40,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            btn.setIcon(self._pixmap_to_icon(thumb))
+            btn.setIconSize(thumb.size())
+        btn.setFixedSize(60, 44)
+        btn.setFlat(True)
+        btn.setToolTip(f"<b>{Path(path).name}</b><br><i>Click to remove</i>")
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setStyleSheet(
+            f"QPushButton {{ background: transparent; border: 1px solid {COLOR_BORDER};"
+            f" border-radius: 4px; padding: 0; }}"
+            f"QPushButton:hover {{ border: 1px solid {COLOR_AUTHOR_TOM}; }}"
+        )
+        btn.clicked.connect(lambda _checked, pp=path: self._remove_attachment(pp))
+        return btn
+
+    def _remove_attachment(self, path: str) -> None:
+        self._attachment_paths = [p for p in self._attachment_paths if p != path]
+        self._refresh_attachments_preview()
+
+    @staticmethod
+    def _pixmap_to_icon(pix):
+        from PyQt6.QtGui import QIcon
+        return QIcon(pix)
 
     def _on_anchor_clicked(self, url: QUrl) -> None:
         href = url.toString()

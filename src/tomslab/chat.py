@@ -363,6 +363,7 @@ def ask(
     history: list[ChatTurn] | None = None,
     auto_correct: bool = False,
     attachment_path: str | None = None,
+    attachment_paths: list[str] | None = None,
 ) -> AnswerResult:
     """Run one chat turn.
 
@@ -371,12 +372,21 @@ def ask(
     it should call :func:`preview_corrections` itself and pass the final
     (user-approved) question with ``auto_correct=False``.
 
-    If ``attachment_path`` is provided, the image is sent multimodally to
-    the chat provider AND the CLIP index is queried for Tom's most
-    visually similar historical charts, which are included in the
-    retrieval context so the model can cite precedents.
+    ``attachment_paths`` takes one or more chart images — any combination
+    of higher / lower timeframes, Bookmap screenshots, etc.  They're all
+    sent multimodally to the chat provider. The CLIP index is queried
+    for visually-similar Tom charts using the FIRST attachment as the
+    probe (a single probe is enough to surface precedents; ranking with
+    multiple queries quickly becomes noisy).  ``attachment_path``
+    remains as a backward-compatible alias for a single image.
     """
     history = history or []
+
+    # Merge the single- and list-style attachment params into one list.
+    images: list[str] = list(attachment_paths or [])
+    if attachment_path and attachment_path not in images:
+        images.insert(0, attachment_path)
+    probe_image = images[0] if images else None
 
     corrected_q = ""
     corrections: list[tuple[str, str]] = []
@@ -392,9 +402,9 @@ def ask(
     # 1a) if the user attached a chart, pull the top visually-similar Tom
     # charts from the CLIP index and splice them into the context so the
     # answer can reference precedents.
-    if attachment_path:
+    if probe_image:
         try:
-            similar = visual.visual_search_by_image(conn, attachment_path, limit=4)
+            similar = visual.visual_search_by_image(conn, probe_image, limit=4)
         except Exception as exc:
             log.warning("visual_search_by_image failed: %s", exc)
             similar = []
@@ -427,38 +437,66 @@ def ask(
     # Use the corrected question inside the prompt so the model answers the
     # intended question, not the typo.
     prompt_q = retrieval_q
-    if attachment_path:
+    if images:
+        n = len(images)
+        many = n > 1
+        chart_noun = f"{n} chart screenshots" if many else "a chart screenshot"
         prompt_q = (
-            "I'm attaching a chart screenshot. Decipher it through Tom's "
-            "framework: identify the market context (balanced/trending/opening "
-            "type), call out visible reference prices (IB, VPOC, HVNs, LVNs, "
-            "VWAP, naked VPOCs), read the order flow, and lay out a plausible "
+            f"I'm attaching {chart_noun}. Decipher through Tom's framework: "
+            "identify the market context (balanced/trending/opening type), "
+            "call out visible reference prices (IB, VPOC, HVNs, LVNs, VWAP, "
+            "naked VPOCs), read the order flow, and lay out a plausible "
             "entry / stop / target consistent with Tom's structured-trade "
             "setups.\n\n"
-            "**CRITICAL price-handling rules for this turn:**\n"
+            + (
+                "First, for each attached image, state which TIMEFRAME / "
+                "chart type it appears to be (e.g. daily/weekly HTF, "
+                "intraday RTH, Bookmap heatmap) and then synthesize across "
+                "them. Higher-timeframe context should set the bias; the "
+                "lower timeframe / Bookmap is where triggers and entries "
+                "live.\n\n"
+                if many else
+                "First, state which TIMEFRAME / chart type the image "
+                "appears to be (HTF daily-weekly, intraday RTH, Bookmap "
+                "heatmap, etc.) and call out what that means for the read.\n\n"
+            )
+            + "**CRITICAL price-handling rules:**\n"
             "1. Read every numeric price (current price, reference levels, "
-            "VPOCs, HVNs, LVNs, IB High/Low, target, stop) DIRECTLY FROM THE "
-            "IMAGE. The tooltip, the axis labels on the right margin, and the "
-            "candle prints are your only sources of truth for numbers.\n"
+            "VPOCs, HVNs, LVNs, IB High/Low, target, stop) DIRECTLY FROM "
+            "THE ATTACHED IMAGE(S). The tooltip, the axis labels on the "
+            "right margin, and the candle prints are your only sources of "
+            "truth for numbers.\n"
             "2. The retrieved Tom messages below are from OTHER trading "
-            "sessions (often years ago). Their numeric prices belong to those "
-            "historical sessions and must NEVER be copied into this analysis "
-            "as if they were on the attached chart. Use retrieved messages "
-            "ONLY for framework concepts (how Tom defines 'initiative' vs "
-            "'responsive', what he looks for at an NVPOC, etc.), not for "
-            "price levels.\n"
-            "3. If you cannot clearly read a price from the image, say "
-            "\"not visible from this screenshot\" — do NOT guess a number, do "
-            "NOT substitute a number from a retrieved message.\n"
+            "sessions (often years ago). Their numeric prices belong to "
+            "those historical sessions and must NEVER be copied into this "
+            "analysis as if they were on the attached chart(s). Use "
+            "retrieved messages ONLY for framework concepts (how Tom "
+            "defines 'initiative' vs 'responsive', what he looks for at "
+            "an NVPOC, etc.), not for price levels.\n"
+            "3. If you cannot clearly read a price from the image(s), say "
+            "\"not visible from this screenshot\" — do NOT guess a number, "
+            "do NOT substitute a number from a retrieved message.\n"
             "4. When you cite a retrieved message, cite it for the CONCEPT "
             "it teaches, not for its price numbers.\n\n"
+            "**Ask for more context when appropriate:**\n"
+            "If a responsible answer to the user's question needs "
+            "information that ISN'T visible in the attached chart(s), "
+            "end your answer with a clearly-labelled **\"To go deeper, "
+            "please attach:\"** section listing exactly what you'd need "
+            "next. Examples:\n"
+            "  - an intraday RTH chart if only HTF is attached\n"
+            "  - the Bookmap heatmap for current order-flow / absorption\n"
+            "  - VWAP overlay if not visible\n"
+            "  - the IB High / IB Low range\n"
+            "Never invent a trade plan to fill in gaps — surface the gap "
+            "and let the user decide whether to attach more.\n\n"
             "Then answer the user's specific question:\n\n" + prompt_q
         )
     messages.append({"role": "user", "content": build_user_prompt(prompt_q, sources)})
 
     # 3) call provider (with automatic fallback chain)
     provider = registry.get_chat_provider(conn)
-    image_paths = [attachment_path] if attachment_path else None
+    image_paths = images or None
     system = build_system_prompt(conn)
 
     answer = ""

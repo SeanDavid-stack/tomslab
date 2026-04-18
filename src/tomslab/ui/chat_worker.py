@@ -15,13 +15,13 @@ class ChatWorker(QThread):
         self,
         question: str,
         history: list[chatmod.ChatTurn],
-        attachment_path: str | None = None,
+        attachment_paths: list[str] | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self._question = question
         self._history = list(history)
-        self._attachment_path = attachment_path
+        self._attachment_paths = list(attachment_paths or [])
 
     def run(self) -> None:
         try:
@@ -30,7 +30,7 @@ class ChatWorker(QThread):
             try:
                 result = chatmod.ask(
                     conn, self._question, self._history,
-                    attachment_path=self._attachment_path,
+                    attachment_paths=self._attachment_paths or None,
                 )
             finally:
                 conn.close()
