@@ -117,47 +117,72 @@ def enumerate_channel(
     title_filter: str = "tom b",
     limit: int | None = None,
 ) -> list[VideoEntry]:
-    """Scrape a YouTube channel across BOTH /videos (regular uploads) and
-    /streams (livestreams / past streams), dedupe by video id, and return
-    only those whose title matches the case-insensitive word-bounded
-    ``title_filter``. Tom B's content lives under /streams — scraping
-    /videos alone misses ~95% of it."""
-    root = _channel_root(channel_url)
-    urls = [f"{root}/videos", f"{root}/streams"]
+    """Enumerate a YouTube channel's content filtered to ``title_filter``.
 
-    all_entries: list[dict] = []
-    channel_name = ""
-    seen_ids: set[str] = set()
-    for u in urls:
-        entries, nm = _enumerate_one(u, limit)
-        channel_name = channel_name or nm
-        for e in entries:
-            vid = (e or {}).get("id") or ""
-            if vid and vid not in seen_ids:
-                seen_ids.add(vid)
-                all_entries.append(e)
+    Primary path: YouTube's in-channel search URL
+    ``/@handle/search?query=<filter>``. The server-side filter is far
+    better than title scraping — it indexes across /videos + /streams +
+    shorts and uses YouTube's fuzzy matching so variations like
+    "with Tom B.", "Tom B,", "by TomB" all resolve.
+
+    Fallback: if search returns nothing (rare, e.g. a channel with
+    search disabled), walk /videos and /streams and filter client-side
+    with the same word-bounded pattern.
+    """
+    root = _channel_root(channel_url)
+    # Use just the first token of the filter as the search query — shorter
+    # is more lenient on YouTube's side. We still apply a client-side
+    # sanity filter below to drop anything that slipped through.
+    query_term = title_filter.strip().split()[0] if title_filter.strip() else "tom"
+    search_url = f"{root}/search?query={query_term}"
+
+    all_entries, channel_name = _enumerate_one(search_url, limit)
+    source = "channel search"
+
+    # Fallback: if search returned nothing, use /videos + /streams.
+    if not all_entries:
+        log.warning("channel search returned 0 — falling back to /videos+/streams")
+        seen_ids: set[str] = set()
+        for u in (f"{root}/videos", f"{root}/streams"):
+            entries, nm = _enumerate_one(u, limit)
+            channel_name = channel_name or nm
+            for e in entries:
+                vid = (e or {}).get("id") or ""
+                if vid and vid not in seen_ids:
+                    seen_ids.add(vid)
+                    all_entries.append(e)
+        source = "/videos + /streams"
 
     pattern = re.compile(rf"\b{re.escape(title_filter.lower())}\b", re.IGNORECASE)
     out: list[VideoEntry] = []
+    seen: set[str] = set()
     for e in all_entries:
         if not e:
             continue
         title = e.get("title") or ""
+        # Keep the word-bounded sanity check — YouTube's search can
+        # sometimes return barely-related suggestions at the tail.
         if not pattern.search(title):
             continue
         vid = e.get("id") or ""
-        if not vid:
+        if not vid or vid in seen:
             continue
+        dur = int(e.get("duration") or 0)
+        # Skip livestream placeholders / upcoming streams with no audio.
+        # A sub-60-second "Tom B" hit isn't a teaching stream.
+        if dur < 60:
+            continue
+        seen.add(vid)
         out.append(VideoEntry(
             id=vid,
             title=title,
             url=e.get("url") or f"https://www.youtube.com/watch?v={vid}",
-            duration_sec=int(e.get("duration") or 0),
+            duration_sec=dur,
             published_at="",
             channel=channel_name,
         ))
-    log.info("%d videos matched %r (across %d unique entries from "
-             "/videos + /streams)", len(out), title_filter, len(all_entries))
+    log.info("%d videos matched %r via %s (from %d entries)",
+             len(out), title_filter, source, len(all_entries))
     return out
 
 
