@@ -78,15 +78,19 @@ class VideoEntry:
     channel: str
 
 
-def enumerate_channel(
-    channel_url: str,
-    title_filter: str = "tom b",
-    limit: int | None = None,
-) -> list[VideoEntry]:
-    """Walk a YouTube channel's /videos page with yt-dlp's flat extractor
-    (fast — just titles + IDs, no per-video metadata round-trips). Return
-    only the entries whose title matches ``title_filter`` (case-insensitive,
-    word-bounded so "tom" alone doesn't match random tom words)."""
+def _channel_root(channel_url: str) -> str:
+    """Given any channel URL (.../videos, .../streams, .../), return the
+    base @handle URL we can then suffix with /videos, /streams, etc."""
+    u = channel_url.rstrip("/")
+    for suffix in ("/videos", "/streams", "/shorts", "/featured", "/playlists"):
+        if u.endswith(suffix):
+            u = u[: -len(suffix)]
+            break
+    return u
+
+
+def _enumerate_one(url: str, limit: int | None) -> tuple[list[dict], str]:
+    """Single yt-dlp walk. Returns (entries, channel_display_name)."""
     if yt_dlp is None:
         raise RuntimeError("yt-dlp not installed")
     opts = {
@@ -97,15 +101,45 @@ def enumerate_channel(
     }
     if limit:
         opts["playlistend"] = int(limit)
-
-    log.info("Enumerating %s", channel_url)
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(channel_url, download=False)
-
+    log.info("Enumerating %s", url)
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except Exception as exc:
+        log.warning("enumerate %s failed: %s", url, exc)
+        return [], ""
     entries = (info.get("entries") or []) if info else []
+    return entries, (info.get("channel") or info.get("title") or "") if info else ""
+
+
+def enumerate_channel(
+    channel_url: str,
+    title_filter: str = "tom b",
+    limit: int | None = None,
+) -> list[VideoEntry]:
+    """Scrape a YouTube channel across BOTH /videos (regular uploads) and
+    /streams (livestreams / past streams), dedupe by video id, and return
+    only those whose title matches the case-insensitive word-bounded
+    ``title_filter``. Tom B's content lives under /streams — scraping
+    /videos alone misses ~95% of it."""
+    root = _channel_root(channel_url)
+    urls = [f"{root}/videos", f"{root}/streams"]
+
+    all_entries: list[dict] = []
+    channel_name = ""
+    seen_ids: set[str] = set()
+    for u in urls:
+        entries, nm = _enumerate_one(u, limit)
+        channel_name = channel_name or nm
+        for e in entries:
+            vid = (e or {}).get("id") or ""
+            if vid and vid not in seen_ids:
+                seen_ids.add(vid)
+                all_entries.append(e)
+
     pattern = re.compile(rf"\b{re.escape(title_filter.lower())}\b", re.IGNORECASE)
     out: list[VideoEntry] = []
-    for e in entries:
+    for e in all_entries:
         if not e:
             continue
         title = e.get("title") or ""
@@ -119,10 +153,11 @@ def enumerate_channel(
             title=title,
             url=e.get("url") or f"https://www.youtube.com/watch?v={vid}",
             duration_sec=int(e.get("duration") or 0),
-            published_at="",   # flat extractor doesn't give us the date
-            channel=info.get("channel") or info.get("title") or "",
+            published_at="",
+            channel=channel_name,
         ))
-    log.info("%d videos matched %r (of %d total)", len(out), title_filter, len(entries))
+    log.info("%d videos matched %r (across %d unique entries from "
+             "/videos + /streams)", len(out), title_filter, len(all_entries))
     return out
 
 
@@ -193,6 +228,16 @@ def _yt_common_opts(browser: str | None) -> dict:
     return opts
 
 
+class CookieDecryptError(RuntimeError):
+    """Raised when yt-dlp can't decrypt the selected browser's cookies.
+
+    On current Chrome (version 127+, Aug 2024 onward) Windows uses
+    App-Bound Encryption for cookies and yt-dlp can't unwrap them.
+    Firefox, Edge, and Brave aren't affected — switch via the
+    ``youtube_browser_cookies`` setting.
+    """
+
+
 def download_audio(
     video_id: str,
     bitrate_kbps: int = 96,
@@ -223,8 +268,19 @@ def download_audio(
     })
     url = f"https://www.youtube.com/watch?v={video_id}"
     log.info("Downloading audio for %s (cookies=%s)", video_id, browser or "none")
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        ydl.extract_info(url, download=True)
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.extract_info(url, download=True)
+    except Exception as exc:
+        msg = str(exc)
+        if "DPAPI" in msg or "Failed to decrypt" in msg or "failed to load cookies" in msg:
+            raise CookieDecryptError(
+                f"Can't read {browser or 'browser'} cookies. Chrome 127+ uses "
+                f"App-Bound Encryption which yt-dlp can't unwrap. Set the "
+                f"youtube_browser_cookies setting to 'firefox', 'edge', or "
+                f"'brave' and retry."
+            ) from exc
+        raise
     if not out.exists():
         for cand in videos_dir().glob(f"{video_id}.*"):
             if cand.suffix.lower() == ".mp3":
@@ -360,7 +416,9 @@ def ingest_single_video(
         raise RuntimeError(f"video {video_id} not enumerated — run the "
                            "channel scraper first, or insert it manually")
 
-    # 1) audio
+    # 1) audio — try the configured browser first; on the Chrome-DPAPI
+    # failure automatically fall through to other installed browsers
+    # before giving up.
     audio = audio_path_for(video_id)
     if not audio.exists():
         if browser is None:
@@ -368,7 +426,33 @@ def ingest_single_video(
                 dbmod.get_setting(conn, "youtube_browser_cookies", "chrome")
                 or "chrome"
             )
-        audio = download_audio(video_id, bitrate_kbps=bitrate_kbps, browser=browser)
+        tried: list[str] = []
+        last_exc: Exception | None = None
+        # Retry chain: primary, then sensible fallbacks that avoid DPAPI.
+        order = [browser] + [b for b in ("firefox", "edge", "brave")
+                              if b != browser.lower()]
+        for b in order:
+            try:
+                audio = download_audio(
+                    video_id, bitrate_kbps=bitrate_kbps, browser=b
+                )
+                if b != browser:
+                    # Promote the one that actually worked so later videos
+                    # skip the dead branch.
+                    dbmod.set_setting(conn, "youtube_browser_cookies", b)
+                    log.info("Switched youtube_browser_cookies to %s "
+                             "(primary %s failed)", b, browser)
+                break
+            except CookieDecryptError as exc:
+                tried.append(b)
+                last_exc = exc
+                continue
+        else:
+            raise RuntimeError(
+                f"Couldn't read cookies from any of: {', '.join(tried)}. "
+                f"Install/login to one of those browsers or set "
+                f"youtube_browser_cookies manually. Last error: {last_exc}"
+            )
     conn.execute(
         "UPDATE videos SET audio_path = ?, transcript_status = 'downloaded' "
         "WHERE id = ?",
