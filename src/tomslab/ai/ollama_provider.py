@@ -78,6 +78,15 @@ class OllamaProvider(AIProvider):
         return [list(v) for v in r.embeddings]
 
     # ---- chat ----------------------------------------------------------
+    # Known-multimodal model names. If chat_model is one of these we trust
+    # it to actually see images; otherwise we route image turns through
+    # vision_model (llava) to avoid silently dropping the chart.
+    _MULTIMODAL_PREFIXES = ("llava", "bakllava", "moondream", "llama3.2-vision", "minicpm-v")
+
+    def _is_multimodal(self, model_name: str) -> bool:
+        n = (model_name or "").lower()
+        return any(n.startswith(pref) for pref in self._MULTIMODAL_PREFIXES)
+
     def chat(
         self,
         messages: list[dict],
@@ -88,23 +97,36 @@ class OllamaProvider(AIProvider):
         if system:
             msgs.append({"role": "system", "content": system})
         msgs.extend(messages)
-        # Attach images to the final user turn if any. Note: the configured
-        # chat model may be text-only (e.g. llama3.1:8b). In that case
-        # Ollama will typically ignore the images — we log it so users
-        # know. If they want multimodal, they should point chat_model_ollama
-        # at llava or similar.
-        if image_paths and msgs:
+
+        # If the user attached an image, we MUST use a multimodal model —
+        # otherwise the model answers blindly against retrieved text context
+        # and fabricates prices from that context. Switch to vision_model
+        # (llava) for this call if the configured chat_model is text-only.
+        model = self._chat_model
+        if image_paths:
+            if not self._is_multimodal(self._chat_model):
+                if self._is_multimodal(self._vision_model):
+                    log.warning(
+                        "Ollama chat: %s is text-only but image attached — "
+                        "routing through vision model %s for this turn",
+                        self._chat_model, self._vision_model,
+                    )
+                    model = self._vision_model
+                else:
+                    raise ProviderError(
+                        f"An image was attached but the Ollama chat model "
+                        f"({self._chat_model}) is text-only and no multimodal "
+                        f"vision model is configured. Either switch chat to "
+                        f"Gemini, change chat_model_ollama to a multimodal "
+                        f"model (e.g. llava), or remove the image."
+                    )
             for i in range(len(msgs) - 1, -1, -1):
                 if msgs[i].get("role") == "user":
                     msgs[i] = {**msgs[i], "images": list(image_paths)}
-                    log.info(
-                        "Ollama chat: attached %d image(s) to final user turn "
-                        "(model=%s — will be ignored if non-multimodal)",
-                        len(image_paths), self._chat_model,
-                    )
                     break
+
         try:
-            r = self._client.chat(model=self._chat_model, messages=msgs)
+            r = self._client.chat(model=model, messages=msgs)
         except Exception as exc:
             raise ProviderError(f"ollama chat failed: {exc}") from exc
         return (r.message.content or "").strip()
