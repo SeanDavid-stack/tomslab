@@ -382,6 +382,61 @@ def visual_search(
     return hits
 
 
+def visual_search_by_image(
+    conn: sqlite3.Connection, image_path: str, limit: int = 5
+) -> list[VisualHit]:
+    """Find the most similar charts in the CLIP index to a given image.
+
+    Used by Ask-Tom when the user attaches their own screenshot — we surface
+    Tom's historical charts that visually resemble it so the answer can
+    cite precedents.
+    """
+    if not image_path:
+        return []
+    with _cache.lock:
+        if not _load_matrix(conn):
+            return []
+        mat = _cache.matrix
+        aids = _cache.attachment_ids
+        mids = _cache.message_ids
+        paths = _cache.local_paths
+        fns = _cache.filenames
+        srcs = _cache.source_types or []
+        pids = _cache.doc_page_ids or []
+        titles = _cache.doc_titles or []
+        pnums = _cache.doc_page_nums or []
+
+    bundle = ensure_loaded(conn)
+    pair = embed_image_paths(bundle, [("query", image_path)])
+    if not pair:
+        return []
+    q = pair[0][1]
+    if q.size != mat.shape[1]:
+        return []
+
+    scores = mat @ q
+    k = min(limit, scores.size)
+    top = np.argpartition(-scores, k - 1)[:k]
+    top = top[np.argsort(-scores[top])]
+
+    hits: list[VisualHit] = []
+    for i in top:
+        idx = int(i)
+        src = srcs[idx] if idx < len(srcs) else "attachment"
+        hits.append(VisualHit(
+            attachment_id=aids[idx] if aids else "",
+            message_id=mids[idx] if mids else "",
+            local_path=paths[idx] if paths else "",
+            filename=fns[idx] if fns else "",
+            score=float(scores[idx]),
+            source_type=src,
+            doc_page_id=pids[idx] if idx < len(pids) and pids[idx] else None,
+            doc_title=titles[idx] if idx < len(titles) else "",
+            doc_page_num=pnums[idx] if idx < len(pnums) else 0,
+        ))
+    return hits
+
+
 def visual_search_message_ids(
     conn: sqlite3.Connection, query: str, limit: int = 120
 ) -> list[str]:

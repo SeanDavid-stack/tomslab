@@ -54,7 +54,14 @@ class AIProvider(ABC):
     # ------------------------------------------------------------------
     # chat (Phase 5)
     # ------------------------------------------------------------------
-    def chat(self, messages: list[dict], system: str | None = None) -> str:
+    def chat(
+        self,
+        messages: list[dict],
+        system: str | None = None,
+        image_paths: list[str] | None = None,
+    ) -> str:
+        """Send a chat turn. ``image_paths`` optionally attaches one or more
+        images to the LAST user message for multimodal providers."""
         raise NotImplementedError(f"{self.name} does not support chat")
 
     # ------------------------------------------------------------------

@@ -12,9 +12,11 @@ import html
 import re
 import sqlite3
 
+from pathlib import Path
 from PyQt6.QtCore import Qt, QUrl, pyqtSignal
-from PyQt6.QtGui import QKeyEvent, QTextCursor
+from PyQt6.QtGui import QKeyEvent, QPixmap, QTextCursor
 from PyQt6.QtWidgets import (
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -134,6 +136,7 @@ class ChatView(QWidget):
         self._last_answer_sources: list = []
         self._worker: ChatWorker | None = None
         self._pending_corrected: str | None = None    # used by the Did-you-mean banner
+        self._attachment_path: str | None = None
 
         self._build_ui()
         self._render_empty_state()
@@ -190,9 +193,33 @@ class ChatView(QWidget):
         self._status.setStyleSheet(f"color: {COLOR_DIM}; padding-left: 24px;")
         outer.addWidget(self._status)
 
+        # --- attachment preview (hidden until a chart is attached) -----
+        self._attachment_frame = QFrame()
+        self._attachment_frame.setStyleSheet(
+            f"QFrame {{ background: {COLOR_BG_ALT}; border: 1px solid {COLOR_BORDER};"
+            f" border-radius: 8px; padding: 6px 10px; margin: 0 12px 4px 12px; }}"
+            f"QLabel {{ color: {COLOR_TEXT}; }}"
+            f"QPushButton {{ background: transparent; color: {COLOR_DIM};"
+            f" padding: 2px 8px; border: 1px solid {COLOR_BORDER}; border-radius: 4px; }}"
+            f"QPushButton:hover {{ color: {COLOR_TEXT}; }}"
+        )
+        ah = QHBoxLayout(self._attachment_frame)
+        ah.setContentsMargins(8, 4, 8, 4)
+        self._attachment_thumb = QLabel()
+        self._attachment_thumb.setFixedSize(56, 40)
+        self._attachment_thumb.setStyleSheet("background: #111; border-radius: 3px;")
+        self._attachment_label = QLabel("")
+        self._attachment_clear = QPushButton("Remove")
+        self._attachment_clear.clicked.connect(self._clear_attachment)
+        ah.addWidget(self._attachment_thumb)
+        ah.addWidget(self._attachment_label, stretch=1)
+        ah.addWidget(self._attachment_clear)
+        self._attachment_frame.setVisible(False)
+        outer.addWidget(self._attachment_frame)
+
         # --- input row ------------------------------------------------
         input_row = QHBoxLayout()
-        input_row.setContentsMargins(12, 0, 12, 10)
+        input_row.setContentsMargins(12, 0, 12, 4)
         input_row.setSpacing(10)
 
         self._input = _InputBox()
@@ -210,6 +237,23 @@ class ChatView(QWidget):
 
         button_col = QVBoxLayout()
         button_col.setSpacing(6)
+
+        # Paperclip → attach a chart image for multimodal analysis.
+        self._attach_btn = QPushButton("📎 Attach chart")
+        self._attach_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._attach_btn.setToolTip(
+            "Attach a Bookmap / Investor-RT screenshot so Ask Tom can\n"
+            "decipher context, entry, stop, target through Tom's framework."
+        )
+        self._attach_btn.setStyleSheet(
+            f"QPushButton {{ background: {COLOR_BG_ALT}; color: {COLOR_TEXT};"
+            f" padding: 8px 14px; border: 1px solid {COLOR_BORDER};"
+            f" border-radius: 8px; font-size: 11px; }}"
+            f"QPushButton:hover {{ border: 1px solid {COLOR_AUTHOR_TOM}; color: {COLOR_AUTHOR_TOM}; }}"
+        )
+        self._attach_btn.clicked.connect(self._on_attach_clicked)
+        button_col.addWidget(self._attach_btn)
+
         self._send_btn = QPushButton("Ask")
         self._send_btn.clicked.connect(self._on_send)
         self._send_btn.setStyleSheet(
@@ -234,6 +278,19 @@ class ChatView(QWidget):
         input_row.addLayout(button_col)
 
         outer.addLayout(input_row)
+
+        # --- persistent disclaimer footer ------------------------------
+        disclaimer = QLabel(
+            "⚠️ Experimental research tool · Not financial advice · "
+            "Verify everything independently · "
+            "You alone are responsible for your trading decisions"
+        )
+        disclaimer.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        disclaimer.setStyleSheet(
+            f"color: {COLOR_DIM}; font-size: 10px; padding: 6px 12px 10px 12px;"
+            f" background: {COLOR_BG}; border-top: 1px solid {COLOR_BORDER};"
+        )
+        outer.addWidget(disclaimer)
 
     # ------------------------------------------------------------------
     # rendering
@@ -470,15 +527,27 @@ class ChatView(QWidget):
     def _submit_now(self, question: str) -> None:
         self._input.clear()
 
-        self._history.append(ChatTurn(role="user", content=question))
+        # Render the user turn with an attachment preview inline so it's
+        # clear the chart went out with the question.
+        if self._attachment_path:
+            display = question + f"\n\n📎 [attached: {Path(self._attachment_path).name}]"
+        else:
+            display = question
+        self._history.append(ChatTurn(role="user", content=display))
         self._render_transcript()
         self._set_busy(True)
         self._status.setText("Thinking…")
 
-        self._worker = ChatWorker(question, self._history[:-1], self)
+        attachment = self._attachment_path
+        self._worker = ChatWorker(
+            question, self._history[:-1],
+            attachment_path=attachment, parent=self,
+        )
         self._worker.answered.connect(self._on_answered)
         self._worker.failed.connect(self._on_failed)
         self._worker.start()
+        # Consume the attachment — a single ask uses it once.
+        self._clear_attachment()
 
     def _on_answered(self, result: AnswerResult) -> None:
         self._worker = None
@@ -524,6 +593,42 @@ class ChatView(QWidget):
     # ------------------------------------------------------------------
     # citation / sample clicks
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # attachment handling
+    # ------------------------------------------------------------------
+    def _on_attach_clicked(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Attach a chart for analysis",
+            "",
+            "Images (*.png *.jpg *.jpeg *.bmp *.webp)",
+        )
+        if not path:
+            return
+        self._attachment_path = path
+        pix = QPixmap(path)
+        if pix.isNull():
+            self._attachment_path = None
+            self._attachment_frame.setVisible(False)
+            return
+        thumb = pix.scaled(
+            56, 40,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self._attachment_thumb.setPixmap(thumb)
+        self._attachment_label.setText(
+            f"Attached: <b>{Path(path).name}</b> "
+            f"<span style='color:{COLOR_DIM};'>· will be sent with your next question</span>"
+        )
+        self._attachment_frame.setVisible(True)
+
+    def _clear_attachment(self) -> None:
+        self._attachment_path = None
+        self._attachment_thumb.clear()
+        self._attachment_label.setText("")
+        self._attachment_frame.setVisible(False)
+
     def _on_anchor_clicked(self, url: QUrl) -> None:
         href = url.toString()
         if href.startswith("sample:"):

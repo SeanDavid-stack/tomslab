@@ -94,13 +94,33 @@ class GeminiProvider(AIProvider):
         return [list(e.values) for e in r.embeddings]
 
     # ---- chat ----------------------------------------------------------
-    def chat(self, messages: list[dict], system: str | None = None) -> str:
+    def chat(
+        self,
+        messages: list[dict],
+        system: str | None = None,
+        image_paths: list[str] | None = None,
+    ) -> str:
         # Gemini takes a single flat 'contents' string for simple turns;
         # for multi-turn with roles use a Content list.
-        contents = [genai_types.Content(
-            role="user" if m["role"] != "assistant" else "model",
-            parts=[genai_types.Part(text=m["content"])],
-        ) for m in messages]
+        contents: list = []
+        for i, m in enumerate(messages):
+            role = "user" if m["role"] != "assistant" else "model"
+            parts = [genai_types.Part(text=m["content"])]
+            # Attach images to the final user turn only — Gemini multimodal
+            # expects image parts interleaved with the text in that turn.
+            is_last_user = (
+                i == len(messages) - 1 and role == "user" and image_paths
+            )
+            if is_last_user:
+                for p in image_paths or []:
+                    try:
+                        from pathlib import Path as _P
+                        data = _P(p).read_bytes()
+                        mime = "image/png" if p.lower().endswith(".png") else "image/jpeg"
+                        parts.append(genai_types.Part.from_bytes(data=data, mime_type=mime))
+                    except Exception as exc:
+                        log.warning("Gemini skipped image %s: %s", p, exc)
+            contents.append(genai_types.Content(role=role, parts=parts))
         config = None
         if system:
             config = genai_types.GenerateContentConfig(system_instruction=system)

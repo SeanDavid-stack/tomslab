@@ -165,6 +165,10 @@ class MainWindow(QMainWindow):
         about_action.triggered.connect(self._show_about)
         help_menu.addAction(about_action)
 
+        disclaimer_action = QAction("&Disclaimer / Legal", self)
+        disclaimer_action.triggered.connect(self._show_disclaimer)
+        help_menu.addAction(disclaimer_action)
+
     # ------------------------------------------------------------------
     # main widgets
     # ------------------------------------------------------------------
@@ -857,6 +861,39 @@ class MainWindow(QMainWindow):
             "Desktop study tool for the Bookmap Discord<br>"
             "<code>traders-lab-tom-b</code> channel.<br><br>"
             f"Database: <code>{database_path()}</code>",
+        )
+
+    def _show_disclaimer(self) -> None:
+        QMessageBox.information(
+            self,
+            "Disclaimer & Legal",
+            "<h3>Experimental research tool</h3>"
+            "<p><b>Tom's Lab is not a trading platform, broker, or advisor.</b></p>"
+            "<p>Everything this app produces — Ask Tom answers, chart analyses, "
+            "citations, similar-chart suggestions, "
+            "entry/stop/target ideas — is <b>experimental output from AI models "
+            "operating on publicly-shared Discord messages and reference "
+            "documents</b>. It is <b>NOT financial advice</b>, NOT a trade "
+            "recommendation, and NOT a substitute for your own analysis, due "
+            "diligence, or the advice of a licensed professional.</p>"
+            "<p><b>You alone are responsible for your trading decisions and for "
+            "any gains or losses that result from them.</b></p>"
+            "<ul>"
+            "<li>Vet every citation against the original source before "
+            "acting on it. Models can misread charts, mis-cite messages, "
+            "and invent plausible-sounding detail.</li>"
+            "<li>Tom B has not reviewed, endorsed, or approved this app or "
+            "its outputs. His posted content is used here as educational "
+            "reference material, not as personalised recommendations.</li>"
+            "<li>Trading futures, equities, and other instruments carries "
+            "substantial risk of loss. Past performance is not indicative "
+            "of future results.</li>"
+            "<li>No warranty is made as to the accuracy, completeness, or "
+            "fitness for purpose of anything this app outputs. Use at your "
+            "own risk.</li>"
+            "</ul>"
+            "<p>By continuing to use Tom's Lab you agree that you understand "
+            "and accept the above.</p>"
         )
 
     # ------------------------------------------------------------------

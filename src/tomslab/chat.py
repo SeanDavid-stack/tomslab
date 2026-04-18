@@ -18,7 +18,7 @@ import re
 import sqlite3
 from dataclasses import dataclass, field
 
-from tomslab import db as dbmod, search as searchmod, semantic, spelling
+from tomslab import db as dbmod, search as searchmod, semantic, spelling, visual
 from tomslab.ai import registry
 from tomslab.ai.base import ProviderError, ProviderUnavailable
 from tomslab.paths import database_path
@@ -84,6 +84,10 @@ How to answer:
 - When the user uses a Tom-framework abbreviation (VPOC, NVPOC, IB, RTH, etc.)
   treat it as the expanded glossary meaning below — never guess what it could
   mean or invent a different expansion.
+- If the user's current message includes an attached chart image, your answer
+  MUST end with this disclaimer block (verbatim), on its own line:
+  ⚠️ **This is an experimental research tool — not financial advice.** Verify
+  everything independently. You alone are responsible for your trading decisions.
 """
 
 
@@ -166,9 +170,17 @@ def retrieve(conn: sqlite3.Connection, question: str) -> list[RetrievedSource]:
       * top K_DOCS_SEM by semantic cosine (author-boosted)
       * top K_DOCS_KW by a keyword-overlap rank over doc text
     The streams are unioned — a hit appearing in both types is kept once.
+
+    If the embedding provider (e.g. Ollama) is unreachable, the semantic
+    passes are silently skipped and we fall back to keyword-only retrieval
+    so the chat still functions with a thinner but non-empty context.
     """
     # ---- Discord: semantic ----------------------------------------------
-    sem_msg = semantic.semantic_search(conn, question, limit=K_DISCORD_SEM * 2)
+    try:
+        sem_msg = semantic.semantic_search(conn, question, limit=K_DISCORD_SEM * 2)
+    except Exception as exc:
+        log.warning("semantic_search unavailable (falling back to keyword): %s", exc)
+        sem_msg = []
     sem_msg_ids = [h.message_id for h in sem_msg if h.message_id][:K_DISCORD_SEM]
 
     # ---- Discord: FTS5 keyword (OR-joined over extracted signal tokens) -
@@ -186,7 +198,11 @@ def retrieve(conn: sqlite3.Connection, question: str) -> list[RetrievedSource]:
             seen_mid.add(mid)
 
     # ---- Docs: semantic (existing mixed path, per-doc capped) -----------
-    mixed = semantic.mixed_semantic_search(conn, question, limit=200)
+    try:
+        mixed = semantic.mixed_semantic_search(conn, question, limit=200)
+    except Exception as exc:
+        log.warning("mixed_semantic_search unavailable (keyword-only docs): %s", exc)
+        mixed = []
     sem_doc_page_ids: list[int] = []
     per_doc: dict[int, int] = {}
     for h in mixed:
@@ -344,6 +360,7 @@ def ask(
     question: str,
     history: list[ChatTurn] | None = None,
     auto_correct: bool = False,
+    attachment_path: str | None = None,
 ) -> AnswerResult:
     """Run one chat turn.
 
@@ -351,6 +368,11 @@ def ask(
     before retrieval.  When the UI wants to show a "Did you mean" banner
     it should call :func:`preview_corrections` itself and pass the final
     (user-approved) question with ``auto_correct=False``.
+
+    If ``attachment_path`` is provided, the image is sent multimodally to
+    the chat provider AND the CLIP index is queried for Tom's most
+    visually similar historical charts, which are included in the
+    retrieval context so the model can cite precedents.
     """
     history = history or []
 
@@ -365,6 +387,37 @@ def ask(
     # 1) retrieve
     sources = retrieve(conn, retrieval_q)
 
+    # 1a) if the user attached a chart, pull the top visually-similar Tom
+    # charts from the CLIP index and splice them into the context so the
+    # answer can reference precedents.
+    if attachment_path:
+        try:
+            similar = visual.visual_search_by_image(conn, attachment_path, limit=4)
+        except Exception as exc:
+            log.warning("visual_search_by_image failed: %s", exc)
+            similar = []
+        for h in similar:
+            if h.source_type == "attachment" and h.message_id:
+                row = conn.execute(
+                    "SELECT author_nickname, author_name, timestamp, content "
+                    "FROM messages WHERE id = ?",
+                    (h.message_id,),
+                ).fetchone()
+                if not row:
+                    continue
+                text = (row["content"] or "").strip() or "(chart with no caption)"
+                if len(text) > CONTEXT_CHAR_CAP:
+                    text = text[: CONTEXT_CHAR_CAP - 1].rstrip() + "…"
+                sources.append(RetrievedSource(
+                    kind="message",
+                    citation_id=f"msg:{h.message_id}",
+                    author=(row["author_nickname"] or row["author_name"] or "?") + " · similar chart",
+                    when=(row["timestamp"] or "")[:10],
+                    text=f"[Tom posted a visually similar chart on {(row['timestamp'] or '')[:10]}.] {text}",
+                    score=h.score,
+                    message_id=h.message_id,
+                ))
+
     # 2) build message list
     messages: list[dict] = []
     for t in history:
@@ -372,12 +425,28 @@ def ask(
     # Use the corrected question inside the prompt so the model answers the
     # intended question, not the typo.
     prompt_q = retrieval_q
+    if attachment_path:
+        prompt_q = (
+            "I'm attaching a chart screenshot. Decipher it through Tom's "
+            "framework: identify the market context (balanced/trending/opening "
+            "type), call out visible reference prices (IB, VPOC, HVNs, LVNs, "
+            "VWAP, naked VPOCs), read the order flow, and lay out a plausible "
+            "entry / stop / target consistent with Tom's structured-trade "
+            "setups. If the attached chart resembles anything in the retrieved "
+            "'similar chart' sources, cite them. Then answer the user's "
+            "specific question:\n\n" + prompt_q
+        )
     messages.append({"role": "user", "content": build_user_prompt(prompt_q, sources)})
 
     # 3) call provider
     provider = registry.get_chat_provider(conn)
+    image_paths = [attachment_path] if attachment_path else None
     try:
-        answer = provider.chat(messages, system=build_system_prompt(conn))
+        answer = provider.chat(
+            messages,
+            system=build_system_prompt(conn),
+            image_paths=image_paths,
+        )
     except (ProviderError, ProviderUnavailable) as exc:
         raise RuntimeError(f"Chat provider error: {exc}") from exc
 
