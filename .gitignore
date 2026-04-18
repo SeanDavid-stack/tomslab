@@ -32,6 +32,7 @@ desktop.ini
 data/
 logs/
 exports/
+doc_images/
 *.db
 *.db-journal
 *.db-wal
