@@ -42,6 +42,7 @@ from tomslab.ingest.importer import ImportResult
 from tomslab.paths import database_path
 from tomslab.search import SearchMode
 from tomslab.ui.chat_view import ChatView
+from tomslab.ui.concept_bar import ConceptChipBar
 from tomslab.ui.embed_worker import EmbedWorker
 from tomslab.ui.gallery_view import GalleryView
 from tomslab.ui.image_embed_worker import ImageEmbedWorker
@@ -53,6 +54,20 @@ from tomslab.ui.settings_dialog import SettingsDialog
 
 # cap the image cache so 10K messages worth of charts don't eat all RAM
 QPixmapCache.setCacheLimit(256 * 1024)  # 256 MB
+
+
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def _fmt_ym(iso_ts: str) -> str:
+    """"2022-01-20T11:45:50-05:00" -> "Jan 2022". Forgiving on malformed input."""
+    try:
+        y = int(iso_ts[:4])
+        m = int(iso_ts[5:7])
+        return f"{_MONTHS[m - 1]} {y}"
+    except Exception:
+        return iso_ts[:7] if iso_ts else ""
 
 
 class MainWindow(QMainWindow):
@@ -144,8 +159,42 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         central = QWidget()
         outer = QVBoxLayout(central)
-        outer.setContentsMargins(10, 8, 10, 6)
-        outer.setSpacing(6)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # --- channel header band ---------------------------------------
+        header = QWidget()
+        header.setStyleSheet(
+            "QWidget { background: qlineargradient(x1:0, y1:0, x2:1, y2:0,"
+            " stop:0 #1E1F22, stop:1 #2B2D31); border-bottom: 1px solid #3F4147; }"
+        )
+        hlay = QHBoxLayout(header)
+        hlay.setContentsMargins(16, 10, 16, 10)
+        badge = QLabel("📒")
+        badge.setStyleSheet("font-size: 20px;")
+        title = QLabel("<b>traders-lab-tom-b</b><br>"
+                       "<span style='color:#949BA4; font-size:11px;'>"
+                       "Bookmap · Tom B's structured trades, order flow, and auction theory</span>")
+        title.setStyleSheet("color: #F2F3F5; font-size: 14px;")
+        hlay.addWidget(badge)
+        hlay.addSpacing(12)
+        hlay.addWidget(title, stretch=1)
+
+        self._header_counts = QLabel("")
+        self._header_counts.setStyleSheet(
+            "color: #949BA4; font-size: 11px; padding: 4px 10px;"
+            " background: #1E1F22; border-radius: 12px;"
+        )
+        hlay.addWidget(self._header_counts)
+        outer.addWidget(header)
+
+        # Body layout resumes with its own margins
+        body = QWidget()
+        body_outer = QVBoxLayout(body)
+        body_outer.setContentsMargins(10, 8, 10, 6)
+        body_outer.setSpacing(6)
+        outer.addWidget(body, stretch=1)
+        outer = body_outer   # keep the rest of the function intact
 
         # --- search bar ------------------------------------------------
         bar = QHBoxLayout()
@@ -176,6 +225,11 @@ class MainWindow(QMainWindow):
         )
         bar.addWidget(self._mode_combo)
         outer.addLayout(bar)
+
+        # --- concept chips (Tom's glossary) ----------------------------
+        self._concept_bar = ConceptChipBar(self._conn, self)
+        self._concept_bar.concept_clicked.connect(self._on_concept_clicked)
+        outer.addWidget(self._concept_bar)
 
         # --- empty state hint ------------------------------------------
         self._empty_hint = QLabel(
@@ -292,6 +346,17 @@ class MainWindow(QMainWindow):
             self._mode_combo.blockSignals(True)
             self._mode_combo.setCurrentIndex(idx)
             self._mode_combo.blockSignals(False)
+
+    def _on_concept_clicked(self, term: str) -> None:
+        """Glossary chip → jump to Feed tab and run a keyword search."""
+        self._tabs.setCurrentIndex(0)
+        self._mode_combo.blockSignals(True)
+        idx = self._mode_combo.findData("keyword")
+        if idx >= 0:
+            self._mode_combo.setCurrentIndex(idx)
+        self._mode_combo.blockSignals(False)
+        self._search.setText(term)
+        self._apply_search()
 
     def _on_tab_changed(self, idx: int) -> None:
         # When user switches to Gallery manually, make sure it reflects current query.
@@ -610,6 +675,17 @@ class MainWindow(QMainWindow):
         query = self._model.current_query()
         self._empty_hint.setVisible(total == 0)
         self._tabs.setVisible(total > 0)
+        # Header stat pill: message count + nice date range.
+        if total:
+            row = self._conn.execute(
+                "SELECT MIN(timestamp) AS a, MAX(timestamp) AS b FROM messages"
+            ).fetchone()
+            date_range = ""
+            if row and row["a"] and row["b"]:
+                date_range = f"   ·   {_fmt_ym(row['a'])} → {_fmt_ym(row['b'])}"
+            self._header_counts.setText(f"{total:,} messages{date_range}")
+        else:
+            self._header_counts.setText("no messages")
         if total == 0:
             self._status_label.setText("Database empty. Import a DCE JSON to begin.")
             return

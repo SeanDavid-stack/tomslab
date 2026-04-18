@@ -7,6 +7,7 @@ bolded in the body text.
 """
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 
@@ -43,14 +44,52 @@ COLOR_DIVIDER   = QColor(255, 255, 255, 16)
 
 # ---- layout constants --------------------------------------------------------
 PAD_X = 14
-PAD_Y = 10
+PAD_Y = 12
 LINE_GAP = 4
-HEADER_H = 22          # author + timestamp line
+HEADER_H = 26          # author + timestamp line
 REPLY_H = 22           # reply preview line
 THUMB_MAX_H = 180
 THUMB_MAX_W = 360
 THUMB_GAP = 6
 MAX_THUMBS = 2
+AVATAR_SIZE = 34
+AVATAR_GAP = 12        # between avatar and text column
+
+
+# A palette of vibrant-but-readable hues used to colour author avatars when
+# the user isn't the featured speaker (Tom gets the gold treatment via the
+# existing code path).
+_AVATAR_PALETTE = (
+    "#5865F2",  # blurple
+    "#3498DB",  # blue
+    "#1ABC9C",  # teal
+    "#2ECC71",  # green
+    "#F39C12",  # amber
+    "#E67E22",  # orange
+    "#E74C3C",  # red
+    "#E91E63",  # pink
+    "#9B59B6",  # purple
+    "#7289DA",  # soft blurple
+    "#11806A",  # dark teal
+    "#1F8B4C",  # dark green
+)
+
+
+def _avatar_color(author_name: str) -> QColor:
+    """Deterministic colour per author."""
+    h = hashlib.md5((author_name or "?").lower().encode("utf-8")).hexdigest()
+    return QColor(_AVATAR_PALETTE[int(h, 16) % len(_AVATAR_PALETTE)])
+
+
+def _avatar_letter(author: str) -> str:
+    a = (author or "?").strip()
+    if not a:
+        return "?"
+    # Discord usernames often start with emoji; fall back to the first letter.
+    for ch in a:
+        if ch.isalpha() or ch.isdigit():
+            return ch.upper()
+    return a[0]
 
 
 class MessageDelegate(QStyledItemDelegate):
@@ -71,7 +110,8 @@ class MessageDelegate(QStyledItemDelegate):
             return super().sizeHint(option, index)
 
         width = max(option.rect.width(), 480)
-        content_w = width - 2 * PAD_X
+        # Avatar column steals space from the content column.
+        content_w = width - 2 * PAD_X - AVATAR_SIZE - AVATAR_GAP
 
         h = PAD_Y + HEADER_H + LINE_GAP
         if msg.reply_to_id and msg.reply_to_author:
@@ -87,7 +127,8 @@ class MessageDelegate(QStyledItemDelegate):
             h += thumb_h + LINE_GAP
 
         h += PAD_Y
-        return QSize(width, max(h, 64))
+        # Ensure the card is at least avatar-height + padding.
+        return QSize(width, max(h, PAD_Y * 2 + AVATAR_SIZE + 6))
 
     # ------------------------------------------------------------------
     # painting
@@ -123,10 +164,15 @@ class MessageDelegate(QStyledItemDelegate):
         elif msg.is_featured_speaker:
             painter.fillRect(rect.x(), rect.y(), 3, rect.height(), COLOR_GOLD)
 
+        # --- avatar ------------------------------------------------------
+        av_x = rect.x() + PAD_X
+        av_y = rect.y() + PAD_Y
+        _paint_avatar(painter, av_x, av_y, msg)
+
         # --- layout ------------------------------------------------------
-        x = rect.x() + PAD_X
+        x = av_x + AVATAR_SIZE + AVATAR_GAP
         y = rect.y() + PAD_Y
-        content_w = rect.width() - 2 * PAD_X
+        content_w = rect.width() - (x - rect.x()) - PAD_X
 
         # reply preview
         if msg.reply_to_id and msg.reply_to_author:
@@ -166,6 +212,40 @@ class MessageDelegate(QStyledItemDelegate):
 # -----------------------------------------------------------------------------
 # painting helpers
 # -----------------------------------------------------------------------------
+def _paint_avatar(painter: QPainter, x: int, y: int, msg: MessageRow) -> None:
+    """Draw the rounded author badge (circle + initial)."""
+    painter.save()
+    # choose colour
+    if msg.doc_meta is not None:
+        bg = COLOR_DOC_BLUE
+        letter = "📄"          # Unicode emoji, not a letter
+    elif msg.is_featured_speaker:
+        bg = COLOR_GOLD
+        letter = "T"
+    else:
+        bg = _avatar_color(msg.author_name or msg.author_nickname or "?")
+        letter = _avatar_letter(msg.author_nickname or msg.author_name or "?")
+
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setBrush(QBrush(bg))
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.drawEllipse(x, y, AVATAR_SIZE, AVATAR_SIZE)
+
+    # letter
+    text_color = QColor("#111214") if bg.lightnessF() > 0.55 else QColor("#FFFFFF")
+    painter.setPen(text_color)
+    f = QFont(painter.font())
+    f.setBold(True)
+    f.setPointSizeF(max(f.pointSizeF() + 2, 11))
+    painter.setFont(f)
+    painter.drawText(
+        QRect(x, y, AVATAR_SIZE, AVATAR_SIZE),
+        int(Qt.AlignmentFlag.AlignCenter),
+        letter,
+    )
+    painter.restore()
+
+
 def _paint_header(
     painter: QPainter, x: int, y: int, width: int, msg: MessageRow
 ) -> None:
