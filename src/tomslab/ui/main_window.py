@@ -46,6 +46,7 @@ from tomslab.ui.bookmarks_view import BookmarksView
 from tomslab.ui.chat_view import ChatView
 from tomslab.ui.concept_bar import ConceptChipBar
 from tomslab.ui.detail_dialog import DetailDialog
+from tomslab.ui.docs_view import DocsView
 from tomslab.ui.embed_worker import EmbedWorker
 from tomslab.ui.gallery_view import GalleryView, ROLE_PATH as GALLERY_ROLE_PATH
 from tomslab.ui.image_embed_worker import ImageEmbedWorker
@@ -315,9 +316,14 @@ class MainWindow(QMainWindow):
         self._bookmarks.message_activated.connect(self._jump_to_message)
         self._bookmarks.citation_clicked.connect(self._on_citation)
 
+        # --- docs tab --------------------------------------------------
+        self._docs = DocsView(self._conn, self)
+        self._docs.page_opened.connect(self._open_image_viewer)
+
         self._tabs.addTab(self._list, "Feed")
         self._tabs.addTab(self._gallery, "Gallery")
         self._tabs.addTab(self._chat, "Ask Tom")
+        self._tabs.addTab(self._docs, "Docs")
         self._tabs.addTab(self._bookmarks, "Bookmarks")
         self._tabs.currentChanged.connect(self._on_tab_changed)
         outer.addWidget(self._tabs, stretch=1)
@@ -467,7 +473,9 @@ class MainWindow(QMainWindow):
                 self._gallery.set_query(self._search.text().strip())
             else:
                 self._gallery.set_query("")
-        elif idx == 3:   # Bookmarks tab
+        elif idx == 3:   # Docs tab
+            self._docs.reload()
+        elif idx == 4:   # Bookmarks tab
             self._bookmarks.reload()
         self._refresh_status()
 
