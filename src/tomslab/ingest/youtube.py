@@ -560,3 +560,186 @@ def ingest_channel(
         "failed": len(errors),
         "errors": errors,
     }
+
+
+# ---------------------------------------------------------------------------
+# folder ingest — offline alternative to direct YouTube download
+# ---------------------------------------------------------------------------
+# YouTube's bot-gate makes direct downloads fragile (see commit history of
+# this file). The reliable path: let the user bulk-download Tom's videos
+# with any consumer tool (4K Video Downloader, yt-dlp CLI, etc.) to a
+# folder, then ingest from there. Filenames from most tools embed the
+# 11-char YouTube ID in brackets or after a dash; we parse it out so
+# citations still link to the canonical URL + timestamp.
+
+_AUDIO_VIDEO_EXTS = (".mp3", ".m4a", ".opus", ".aac", ".wav", ".flac",
+                     ".mp4", ".webm", ".mkv", ".mov")
+
+# 4K Video Downloader:    "Title [VIDEO_ID].mp3"
+# yt-dlp default:          "Title-VIDEO_ID.ext" or "Title [VIDEO_ID].ext"
+# Trailing-ID form is common because the extension is stripped before we
+# hit the regex (we match against the stem), so the id often lands at EOL.
+_YT_ID_IN_FILENAME = re.compile(
+    r"(?:\[|[\s\-_])([A-Za-z0-9_-]{11})(?:\]|[\s\.]|$)"
+)
+
+
+def _parse_video_id(stem: str) -> str | None:
+    """Find a likely YouTube id embedded in a filename stem, or None."""
+    m = _YT_ID_IN_FILENAME.search(stem)
+    return m.group(1) if m else None
+
+
+def _derive_id_from_path(path: Path) -> str:
+    """Generate a stable synthetic id for files that don't carry a YouTube
+    id — uses a short hash of the filename so re-runs are idempotent."""
+    import hashlib
+    h = hashlib.sha1(path.name.encode("utf-8")).hexdigest()[:11]
+    return f"local_{h}"
+
+
+def _probe_duration_sec(path: Path) -> int:
+    """Best-effort audio duration via ffprobe. Returns 0 if not available."""
+    import subprocess
+    ffmpeg = _ffmpeg_path()
+    # imageio-ffmpeg ships ffmpeg.exe; ffprobe is usually alongside it.
+    probe = Path(ffmpeg).with_name("ffprobe" + Path(ffmpeg).suffix)
+    candidates = [probe, Path("ffprobe"), Path("ffprobe.exe")]
+    for p in candidates:
+        try:
+            out = subprocess.run(
+                [str(p), "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+                capture_output=True, text=True, timeout=30,
+            )
+            if out.returncode == 0 and out.stdout.strip():
+                return int(float(out.stdout.strip()))
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+    return 0
+
+
+def scan_folder_for_videos(folder: Path) -> list[dict]:
+    """Walk `folder` looking for audio/video files and return a list of
+    candidate video rows ready for upsert. Does not touch the DB."""
+    out: list[dict] = []
+    for p in sorted(folder.rglob("*")):
+        if not p.is_file():
+            continue
+        if p.suffix.lower() not in _AUDIO_VIDEO_EXTS:
+            continue
+        yt_id = _parse_video_id(p.stem)
+        vid = yt_id or _derive_id_from_path(p)
+        title = p.stem
+        if yt_id:
+            # Strip the "[VIDEO_ID]" suffix from the title for cleanliness
+            title = re.sub(rf"[\s\-_\[]*{re.escape(yt_id)}[\]\.]*\s*$", "",
+                           title).strip(" -_[]")
+        url = (f"https://www.youtube.com/watch?v={yt_id}" if yt_id else "")
+        out.append({
+            "id": vid,
+            "title": title,
+            "url": url,
+            "source_channel": folder.name,
+            "duration_sec": 0,    # probed lazily in ingest_folder below
+            "audio_path": str(p),
+            "has_yt_id": bool(yt_id),
+        })
+    return out
+
+
+def ingest_folder(
+    conn: sqlite3.Connection,
+    folder: Path,
+    model_name: str = "large-v3",
+    progress: ProgressFn | None = None,
+) -> dict:
+    """Ingest every audio/video file in `folder` (recursive). For each one:
+    insert a videos row pointing at the existing file, probe duration,
+    transcribe with faster-whisper, chunk, and store. Files already
+    transcribed (matched by id) are skipped, so re-running is cheap."""
+    folder = Path(folder)
+    if not folder.is_dir():
+        raise RuntimeError(f"{folder} is not a directory")
+    if progress:
+        progress("Scanning folder", 0, 0)
+    candidates = scan_folder_for_videos(folder)
+
+    now = datetime.now(timezone.utc).isoformat()
+    added = 0
+    for c in candidates:
+        existing = conn.execute(
+            "SELECT transcript_status FROM videos WHERE id = ?", (c["id"],)
+        ).fetchone()
+        if existing:
+            # Update audio_path in case the folder moved; don't overwrite
+            # a completed transcription.
+            conn.execute(
+                "UPDATE videos SET audio_path = ? WHERE id = ?",
+                (c["audio_path"], c["id"]),
+            )
+            continue
+        conn.execute(
+            "INSERT INTO videos(id, title, url, source_channel, duration_sec,"
+            " audio_path, transcript_status, added_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (c["id"], c["title"], c["url"], c["source_channel"],
+             c["duration_sec"], c["audio_path"], "downloaded", now),
+        )
+        added += 1
+    conn.commit()
+
+    pending = conn.execute(
+        "SELECT id, audio_path FROM videos "
+        "WHERE transcript_status IN ('pending','downloaded','failed') "
+        "ORDER BY added_at"
+    ).fetchall()
+    total = len(pending)
+
+    done = 0
+    errors: list[tuple[str, str]] = []
+    for i, r in enumerate(pending, start=1):
+        vid = r["id"]
+        audio = Path(r["audio_path"]) if r["audio_path"] else None
+        if progress:
+            progress(f"Transcribing {vid}", i - 1, total)
+        if audio is None or not audio.exists():
+            errors.append((vid, "audio file missing"))
+            continue
+        try:
+            # Probe duration once for UI niceness; cheap compared to whisper.
+            dur = _probe_duration_sec(audio)
+            if dur:
+                conn.execute(
+                    "UPDATE videos SET duration_sec = ? WHERE id = ?",
+                    (dur, vid),
+                )
+            segs = transcribe(audio, model_name=model_name)
+            chunks = chunk_segments(segs)
+            store_chunks(conn, vid, chunks)
+            conn.execute(
+                "UPDATE videos SET transcript_status = 'transcribed', "
+                "transcript_error = NULL WHERE id = ?",
+                (vid,),
+            )
+            conn.commit()
+            done += 1
+        except Exception as exc:
+            log.warning("folder-ingest %s failed: %s", vid, exc)
+            conn.execute(
+                "UPDATE videos SET transcript_status = 'failed', "
+                "transcript_error = ? WHERE id = ?",
+                (str(exc)[:500], vid),
+            )
+            conn.commit()
+            errors.append((vid, str(exc)[:300]))
+
+    if progress:
+        progress("Done", total, total)
+    return {
+        "scanned": len(candidates),
+        "newly_added_rows": added,
+        "processed": done,
+        "failed": len(errors),
+        "errors": errors,
+    }

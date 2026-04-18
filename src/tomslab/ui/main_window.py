@@ -153,11 +153,19 @@ class MainWindow(QMainWindow):
         self._build_image_embed_action.triggered.connect(self._on_build_image_embeddings)
         file_menu.addAction(self._build_image_embed_action)
 
+        self._import_folder_action = QAction(
+            "Import videos from &folder… (recommended)", self
+        )
+        self._import_folder_action.triggered.connect(self._on_import_video_folder)
+        file_menu.addAction(self._import_folder_action)
+
         self._signin_youtube_action = QAction("&Sign in to YouTube (one-time)…", self)
         self._signin_youtube_action.triggered.connect(self._on_signin_youtube)
         file_menu.addAction(self._signin_youtube_action)
 
-        self._ingest_youtube_action = QAction("Import &YouTube (TomTube)…", self)
+        self._ingest_youtube_action = QAction(
+            "Import &YouTube directly (experimental)…", self
+        )
         self._ingest_youtube_action.triggered.connect(self._on_ingest_youtube)
         file_menu.addAction(self._ingest_youtube_action)
 
@@ -1034,6 +1042,92 @@ class MainWindow(QMainWindow):
         self._progress_bar.setVisible(False)
         self._video_worker = None
         QMessageBox.critical(self, "TomTube ingest failed", err)
+        self._refresh_status()
+
+    # ---- Folder-based video import (reliable path) --------------------
+    def _on_import_video_folder(self) -> None:
+        """User picks a folder of pre-downloaded audio/video files. We
+        scan, upsert rows, then transcribe + chunk each one."""
+        if self._video_worker is not None and self._video_worker.isRunning():
+            QMessageBox.information(self, "Already running",
+                                    "A video ingest is already in progress.")
+            return
+
+        from PyQt6.QtWidgets import QFileDialog
+        last = dbmod.get_setting(self._conn, "video_import_folder", "") or ""
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select folder with Tom's video files", last,
+        )
+        if not folder:
+            return
+
+        from pathlib import Path
+        from tomslab.ingest.youtube import scan_folder_for_videos
+        try:
+            candidates = scan_folder_for_videos(Path(folder))
+        except Exception as exc:
+            QMessageBox.critical(self, "Scan failed",
+                                 f"{type(exc).__name__}: {exc}")
+            return
+        if not candidates:
+            QMessageBox.warning(
+                self, "No video files found",
+                f"Didn't find any .mp3/.mp4/.m4a/.webm/etc files in:\n\n{folder}"
+                "\n\nTip: download Tom's videos with 4K Video Downloader "
+                "(free) and point here at its output folder.",
+            )
+            return
+
+        with_id = sum(1 for c in candidates if c["has_yt_id"])
+        reply = QMessageBox.question(
+            self,
+            "Import videos from folder",
+            f"<b>Found {len(candidates)} media file(s)</b> in:<br>"
+            f"<code>{folder}</code><br><br>"
+            f"{with_id} have a YouTube id in the filename (citations will "
+            f"deep-link to youtube.com with timestamps). "
+            f"{len(candidates) - with_id} don't — they'll still be "
+            f"searchable but without the YouTube link.<br><br>"
+            f"<b>Each file will be transcribed on your GPU (~10× realtime).</b>"
+            f" Resumable — close the app any time and it picks up where "
+            f"it left off.<br><br>Proceed?",
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Ok,
+        )
+        if reply != QMessageBox.StandardButton.Ok:
+            return
+
+        dbmod.set_setting(self._conn, "video_import_folder", folder)
+
+        from tomslab.ui.video_worker import FolderIngestWorker
+        self._progress_bar.setVisible(True)
+        self._progress_bar.setRange(0, 0)
+        self._status_label.setText("Folder import: starting…")
+        self._video_worker = FolderIngestWorker(
+            folder=Path(folder),
+            model_name=dbmod.get_setting(self._conn, "whisper_model", "large-v3"),
+            parent=self,
+        )
+        self._video_worker.progress.connect(self._on_video_progress)
+        self._video_worker.finished_ok.connect(self._on_folder_finished)
+        self._video_worker.failed.connect(self._on_video_failed)
+        self._video_worker.start()
+
+    def _on_folder_finished(self, report: object) -> None:
+        """Folder-specific completion dialog (different keys than channel
+        ingest)."""
+        self._progress_bar.setVisible(False)
+        self._video_worker = None
+        self._tomtube.reload()
+        d = report if isinstance(report, dict) else {}
+        QMessageBox.information(
+            self,
+            "Folder import complete",
+            f"Scanned: {d.get('scanned', 0)}\n"
+            f"Newly added rows: {d.get('newly_added_rows', 0)}\n"
+            f"Transcribed OK: {d.get('processed', 0)}\n"
+            f"Failed: {d.get('failed', 0)}",
+        )
         self._refresh_status()
 
     # ------------------------------------------------------------------
