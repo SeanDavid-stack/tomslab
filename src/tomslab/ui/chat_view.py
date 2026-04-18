@@ -15,7 +15,7 @@ import sqlite3
 import tempfile
 import time
 from pathlib import Path
-from PyQt6.QtCore import QMimeData, Qt, QUrl, pyqtSignal
+from PyQt6.QtCore import QMimeData, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QKeyEvent, QPixmap, QTextCursor
 from PyQt6.QtWidgets import (
     QFileDialog,
