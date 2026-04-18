@@ -246,6 +246,7 @@ DEFAULT_SETTINGS: dict[str, str] = {
     # leaving Gemini available in the same provider layer for chat later.
     "ai_provider_embed": "ollama",
     "ai_provider_chat": "gemini",
+    "ai_provider_chat_fallback": "ollama",   # used when chat primary fails
     "ai_provider_vision": "ollama",
     "embed_model_ollama": "nomic-embed-text",
     "embed_model_gemini": "gemini-embedding-001",

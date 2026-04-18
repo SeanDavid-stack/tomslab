@@ -29,6 +29,8 @@ from PyQt6.QtWidgets import (
 
 from tomslab import bookmarks as bmmod
 from tomslab import chat as chatmod
+from tomslab import db as dbmod
+from tomslab.ai import registry as aireg
 from tomslab.chat import AnswerResult, ChatTurn, CITATION_RE
 from tomslab.ui.chat_worker import ChatWorker
 
@@ -148,6 +150,38 @@ class ChatView(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(6)
+
+        # --- quick-switch: Gemini <-> Ollama ---------------------------
+        switch_row = QHBoxLayout()
+        switch_row.setContentsMargins(16, 8, 16, 0)
+        switch_row.setSpacing(6)
+        switch_label = QLabel("Chat model:")
+        switch_label.setStyleSheet(f"color: {COLOR_DIM}; font-size: 11px;")
+        switch_row.addWidget(switch_label)
+
+        self._btn_gemini = QPushButton("🌩  Gemini (cloud)")
+        self._btn_ollama = QPushButton("🖥  Ollama (local)")
+        for btn in (self._btn_gemini, self._btn_ollama):
+            btn.setCheckable(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(
+                f"QPushButton {{ background: {COLOR_BG_ALT}; color: {COLOR_DIM};"
+                f" padding: 4px 12px; border: 1px solid {COLOR_BORDER};"
+                f" border-radius: 12px; font-size: 11px; }}"
+                f"QPushButton:checked {{ background: #3A3320; color: {COLOR_AUTHOR_TOM};"
+                f" border: 1px solid {COLOR_AUTHOR_TOM}; }}"
+                f"QPushButton:hover {{ color: {COLOR_TEXT}; }}"
+            )
+        self._btn_gemini.clicked.connect(lambda: self._set_chat_provider("gemini"))
+        self._btn_ollama.clicked.connect(lambda: self._set_chat_provider("ollama"))
+        switch_row.addWidget(self._btn_gemini)
+        switch_row.addWidget(self._btn_ollama)
+        switch_row.addStretch(1)
+        self._provider_hint = QLabel("")
+        self._provider_hint.setStyleSheet(f"color: {COLOR_DIM}; font-size: 10px;")
+        switch_row.addWidget(self._provider_hint)
+        outer.addLayout(switch_row)
+        self._refresh_chat_provider_buttons()
 
         self._transcript = QTextBrowser()
         self._transcript.setOpenExternalLinks(False)
@@ -553,13 +587,25 @@ class ChatView(QWidget):
         self._worker = None
         self._last_answer_sources = result.sources
         self._last_answer_citations = list(result.citations)
-        self._history.append(ChatTurn(role="assistant", content=result.answer or "(no answer)"))
+
+        # If we had to fall back (e.g. Gemini rate-limited), inline a small
+        # note at the top of the answer so the user knows what happened.
+        content = result.answer or "(no answer)"
+        if result.fallback_reason and result.provider_used:
+            content = (
+                f"_⚠️ Primary chat provider hit a limit — answered by "
+                f"{result.provider_used} (local fallback) instead._\n\n" + content
+            )
+
+        self._history.append(ChatTurn(role="assistant", content=content))
         self._render_transcript()
         self._set_busy(False)
         n_cites = len(result.citations)
         n_src = len(result.sources)
+        provider = result.provider_used or ""
+        tail = f" · answered by {provider}" if provider else ""
         self._status.setText(
-            f"{n_src} sources retrieved · {n_cites} citations · Ctrl+Enter to send"
+            f"{n_src} sources retrieved · {n_cites} citations{tail} · Ctrl+Enter to send"
         )
 
     def _on_failed(self, err: str) -> None:
@@ -593,6 +639,43 @@ class ChatView(QWidget):
     # ------------------------------------------------------------------
     # citation / sample clicks
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # quick-switch chat provider (Gemini cloud ↔ Ollama local)
+    # ------------------------------------------------------------------
+    def _set_chat_provider(self, name: str) -> None:
+        name = name.strip().lower()
+        if name not in ("gemini", "ollama"):
+            return
+        # Primary = chosen, fallback = the other one (so bursts over Gemini
+        # free-tier caps spill onto local llama3.1 instead of erroring).
+        fallback = "ollama" if name == "gemini" else "gemini"
+        dbmod.set_setting(self._conn, "ai_provider_chat", name)
+        dbmod.set_setting(self._conn, "ai_provider_chat_fallback", fallback)
+        # Blow the provider cache so the next ask() picks the new setting up
+        aireg.reset_cache()
+        self._refresh_chat_provider_buttons()
+
+    def _refresh_chat_provider_buttons(self) -> None:
+        current = (
+            dbmod.get_setting(self._conn, "ai_provider_chat", "gemini") or "gemini"
+        ).strip().lower()
+        fb = (
+            dbmod.get_setting(self._conn, "ai_provider_chat_fallback", "") or ""
+        ).strip().lower()
+
+        # .setChecked without signals
+        for btn, tag in ((self._btn_gemini, "gemini"), (self._btn_ollama, "ollama")):
+            btn.blockSignals(True)
+            btn.setChecked(tag == current)
+            btn.blockSignals(False)
+
+        if fb and fb != current:
+            self._provider_hint.setText(
+                f"Primary: {current}   ·   fallback: {fb} (auto when primary rate-limits)"
+            )
+        else:
+            self._provider_hint.setText(f"Primary: {current}")
+
     # ------------------------------------------------------------------
     # attachment handling
     # ------------------------------------------------------------------

@@ -152,6 +152,8 @@ class AnswerResult:
     raw_prompt: str = ""                   # kept for debugging, not displayed
     corrected_question: str = ""           # after spell correction (empty if none)
     corrections: list[tuple[str, str]] = field(default_factory=list)
+    provider_used: str = ""                # 'gemini' | 'ollama' — which answered
+    fallback_reason: str = ""              # populated when we had to fall back
 
 
 CITATION_RE = re.compile(r"\[(msg|doc):([\w:\-]+)\]")
@@ -438,17 +440,36 @@ def ask(
         )
     messages.append({"role": "user", "content": build_user_prompt(prompt_q, sources)})
 
-    # 3) call provider
+    # 3) call provider (with automatic fallback chain)
     provider = registry.get_chat_provider(conn)
     image_paths = [attachment_path] if attachment_path else None
+    system = build_system_prompt(conn)
+
+    answer = ""
+    provider_used = provider.name
+    fallback_reason = ""
     try:
-        answer = provider.chat(
-            messages,
-            system=build_system_prompt(conn),
-            image_paths=image_paths,
-        )
+        answer = provider.chat(messages, system=system, image_paths=image_paths)
     except (ProviderError, ProviderUnavailable) as exc:
-        raise RuntimeError(f"Chat provider error: {exc}") from exc
+        # Primary failed — try the fallback chat provider if one is configured.
+        fb = registry.get_chat_fallback(conn)
+        if fb is None:
+            raise RuntimeError(f"Chat provider error: {exc}") from exc
+        fallback_reason = str(exc)[:200]
+        log.warning(
+            "Chat primary (%s) failed — falling back to %s: %s",
+            provider.name, fb.name, fallback_reason,
+        )
+        try:
+            answer = fb.chat(messages, system=system, image_paths=image_paths)
+            provider_used = fb.name
+        except (ProviderError, ProviderUnavailable) as exc2:
+            # Both failed. Surface the primary's error since that's the
+            # one the user presumably configured.
+            raise RuntimeError(
+                f"Chat failed on both {provider.name} and {fb.name}: "
+                f"{exc} // fallback: {exc2}"
+            ) from exc2
 
     citations = [
         f"{m.group(1)}:{m.group(2)}" for m in CITATION_RE.finditer(answer or "")
@@ -460,4 +481,6 @@ def ask(
         raw_prompt=messages[-1]["content"],
         corrected_question=corrected_q if corrections else "",
         corrections=corrections,
+        provider_used=provider_used,
+        fallback_reason=fallback_reason,
     )

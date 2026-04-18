@@ -84,6 +84,23 @@ def get_chat_provider(conn: sqlite3.Connection) -> AIProvider:
     return _provider_for(conn, "chat")
 
 
+def get_chat_fallback(conn: sqlite3.Connection) -> AIProvider | None:
+    """Optional secondary chat provider. Used automatically when the
+    primary provider fails with a rate-limit / outage / auth error."""
+    name = dbmod.get_setting(conn, "ai_provider_chat_fallback", "") or ""
+    name = name.strip().lower()
+    if not name:
+        return None
+    primary = dbmod.get_setting(conn, "ai_provider_chat", "gemini") or "gemini"
+    if name == primary.strip().lower():
+        return None    # no point in falling back to the same thing
+    try:
+        return build_provider(conn, name, "chat")
+    except Exception as exc:
+        log.warning("chat fallback %s unavailable: %s", name, exc)
+        return None
+
+
 def get_vision_provider(conn: sqlite3.Connection) -> AIProvider:
     return _provider_for(conn, "vision")
 
