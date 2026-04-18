@@ -337,12 +337,20 @@ def download_audio(
             except Exception as exc:
                 msg = str(exc)
                 last_exc = exc
-                if "DPAPI" in msg or "Failed to decrypt" in msg or "failed to load cookies" in msg:
+                cookie_fail_markers = (
+                    "DPAPI",
+                    "Failed to decrypt",
+                    "failed to load cookies",
+                    "Could not copy",        # Chrome DB locked (Chrome running)
+                    "could not find cookie",
+                    "cookie database",
+                )
+                if any(m in msg for m in cookie_fail_markers):
                     raise CookieDecryptError(
-                        f"Can't read {browser or 'browser'} cookies. Chrome 127+ uses "
-                        f"App-Bound Encryption which yt-dlp can't unwrap. Set the "
-                        f"youtube_browser_cookies setting to 'firefox', 'edge', or "
-                        f"'brave' and retry."
+                        f"Can't read {browser or 'browser'} cookies. Either "
+                        f"the browser is running and holding the DB lock, or "
+                        f"Chrome 127+ App-Bound Encryption is in play. Falling "
+                        f"back to another browser."
                     ) from exc
                 if "Requested format is not available" in msg:
                     if i + 1 < len(format_chain):
