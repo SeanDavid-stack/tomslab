@@ -56,13 +56,25 @@ def build_fts_query(user_text: str) -> str:
     return " ".join(pieces)
 
 
+MIN_CONTENT_LEN_FOR_SEARCH = 12   # filters out "👍", "lol", "ok", etc. from search
+                                   # results (browse mode is unaffected)
+
+
 def count_keyword_hits(conn: sqlite3.Connection, user_text: str) -> int:
+    """Override the simpler counter to match the same content-length filter
+    keyword_search_ids uses, so status-bar totals stay honest."""
     q = build_fts_query(user_text)
     if not q:
         return 0
     row = conn.execute(
-        "SELECT COUNT(*) AS n FROM messages_fts WHERE messages_fts MATCH ?",
-        (q,),
+        """
+        SELECT COUNT(*) AS n
+          FROM messages_fts fts
+          JOIN messages m ON m.id = fts.id
+         WHERE messages_fts MATCH ?
+           AND LENGTH(TRIM(COALESCE(m.content, ''))) >= ?
+        """,
+        (q, MIN_CONTENT_LEN_FOR_SEARCH),
     ).fetchone()
     return int(row["n"] or 0)
 
@@ -75,7 +87,9 @@ def keyword_search_ids(
 ) -> list[str]:
     """Return up to `limit` message IDs matching `user_text`, best-scored first.
 
-    We sort by bm25() (built into FTS5) ascending — lower is better.
+    Filters out messages whose content is trivially short — this keeps the
+    results clean when a prefix match hits a username like "MrClips" and the
+    matching messages turn out to be single-emoji replies.
     """
     q = build_fts_query(user_text)
     if not q:
@@ -84,11 +98,13 @@ def keyword_search_ids(
         """
         SELECT fts.id
           FROM messages_fts fts
+          JOIN messages m ON m.id = fts.id
          WHERE messages_fts MATCH ?
+           AND LENGTH(TRIM(COALESCE(m.content, ''))) >= ?
          ORDER BY bm25(messages_fts) ASC
          LIMIT ? OFFSET ?
         """,
-        (q, limit, offset),
+        (q, MIN_CONTENT_LEN_FOR_SEARCH, limit, offset),
     ).fetchall()
     return [r["id"] for r in rows]
 
@@ -119,11 +135,13 @@ def keyword_search_ids_broad(
             """
             SELECT fts.id
               FROM messages_fts fts
+              JOIN messages m ON m.id = fts.id
              WHERE messages_fts MATCH ?
+               AND LENGTH(TRIM(COALESCE(m.content, ''))) >= ?
              ORDER BY bm25(messages_fts) ASC
              LIMIT ?
             """,
-            (q, limit),
+            (q, MIN_CONTENT_LEN_FOR_SEARCH, limit),
         ).fetchall()
     except Exception:
         return []

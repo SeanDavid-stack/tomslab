@@ -297,12 +297,35 @@ class MainWindow(QMainWindow):
         mode = SearchMode(mode_str)
         self._delegate.set_match_terms(query if mode == SearchMode.KEYWORD else "")
         self._model.set_query(query, mode=mode)
-        # Gallery always reflects the search — visual mode uses CLIP, other
-        # modes fall back to "latest featured-speaker charts" (query ignored).
+
+        # --- keep the Gallery in lockstep with the Feed's search ---------
+        #   * Visual mode: CLIP-based text-to-image search (gallery does its own).
+        #   * Keyword / Semantic: scope gallery to charts attached to the same
+        #     messages the Feed is showing.
+        #   * No query: gallery shows nothing.
         if mode == SearchMode.VISUAL:
+            self._gallery.set_message_scope(None)
             self._gallery.set_query(query)
+        elif query:
+            self._gallery.set_query("")   # no CLIP query in these modes
+            # Pull the matching message ids out of the model's row cache.
+            ids: list[str] = []
+            for row in range(self._model.rowCount()):
+                r = self._model.data(self._model.index(row, 0), ROLE_MESSAGE)
+                if r is not None and not r.doc_meta:
+                    ids.append(r.id)
+            # If we've only loaded the first page, top up from the raw search ids.
+            raw = getattr(self._model, "_search_ids", [])
+            for rid in raw:
+                if rid and rid.startswith("msg:"):
+                    mid = rid[4:]
+                    if mid not in ids:
+                        ids.append(mid)
+            self._gallery.set_message_scope(ids)
         else:
             self._gallery.set_query("")
+            self._gallery.set_message_scope(None)
+
         err = self._model.last_error()
         if err:
             QMessageBox.warning(self, "Search failed", err)

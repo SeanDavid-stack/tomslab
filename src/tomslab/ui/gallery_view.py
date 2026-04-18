@@ -41,17 +41,31 @@ class GalleryItem:
 
 
 class GalleryModel(QAbstractListModel):
-    """Either 'latest N featured-speaker charts' or visual-search ranking."""
+    """Search-driven: shows charts from the messages / doc pages currently
+    matching the user's Feed search. If there's no search and no visual
+    query, the model is empty — no "browse everything" mode.
+    """
 
     def __init__(self, conn: sqlite3.Connection, parent: Any = None) -> None:
         super().__init__(parent)
         self._conn = conn
         self._items: list[GalleryItem] = []
         self._query: str = ""
+        self._scope_message_ids: list[str] | None = None  # restrict to these message ids
 
     # ------------------------------------------------------------------
     def set_query(self, query: str) -> None:
         self._query = (query or "").strip()
+        self.reload()
+
+    def set_message_scope(self, ids: list[str] | None) -> None:
+        """Restrict gallery to attachments on these specific message ids.
+
+        Used by MainWindow to mirror the Feed's search results into the
+        Gallery — type "VPOC" in Keyword mode and the Gallery shows the
+        charts attached to those matching Tom/Discord messages.
+        """
+        self._scope_message_ids = list(ids) if ids else None
         self.reload()
 
     def reload(self) -> None:
@@ -100,29 +114,46 @@ class GalleryModel(QAbstractListModel):
 
     # ------------------------------------------------------------------
     def _load_items(self) -> list[GalleryItem]:
+        # Three modes, in priority order:
+        # 1. Scoped to message IDs set by the Feed search (Keyword/Semantic mode)
+        # 2. Visual-search text query (Visual mode)
+        # 3. Nothing -> empty
+        if self._scope_message_ids is not None:
+            return self._load_by_message_scope()
         if self._query:
             return self._load_visual_search()
-        return self._load_recent_featured()
+        return []
 
-    def _load_recent_featured(self) -> list[GalleryItem]:
+    def _load_by_message_scope(self) -> list[GalleryItem]:
+        ids = self._scope_message_ids or []
+        if not ids:
+            return []
+        # Cap to avoid blowing SQLite's parameter limit (usually 32K, well above this).
+        ids = ids[:MAX_ROWS]
+        placeholders = ",".join("?" * len(ids))
         rows = self._conn.execute(
-            """
+            f"""
             SELECT a.id AS aid, a.message_id AS mid, a.local_path AS path, a.filename AS fn,
                    m.timestamp AS ts, m.author_nickname AS nick, m.author_name AS aname,
                    m.is_featured_speaker AS feat
               FROM attachments a
               JOIN messages m ON m.id = a.message_id
-             WHERE a.local_path IS NOT NULL AND a.local_path != ''
-               AND lower(a.filename) LIKE '%.png'
-                OR lower(a.filename) LIKE '%.jpg'
-                OR lower(a.filename) LIKE '%.jpeg'
-                OR lower(a.filename) LIKE '%.gif'
-                OR lower(a.filename) LIKE '%.webp'
-             ORDER BY (m.is_featured_speaker = 1) DESC, m.timestamp DESC
-             LIMIT ?
+             WHERE a.message_id IN ({placeholders})
+               AND a.local_path IS NOT NULL AND a.local_path != ''
+               AND (
+                    lower(a.filename) LIKE '%.png'
+                 OR lower(a.filename) LIKE '%.jpg'
+                 OR lower(a.filename) LIKE '%.jpeg'
+                 OR lower(a.filename) LIKE '%.gif'
+                 OR lower(a.filename) LIKE '%.webp'
+               )
+             ORDER BY m.timestamp DESC
             """,
-            (MAX_ROWS,),
+            ids,
         ).fetchall()
+        # Preserve the message_id order (search relevance rank) above timestamp
+        order = {mid: i for i, mid in enumerate(ids)}
+        rows = sorted(rows, key=lambda r: (order.get(r["mid"], 10**9),))
         return [
             GalleryItem(
                 attachment_id=r["aid"],
@@ -243,6 +274,10 @@ class GalleryView(QWidget):
         self._model.set_query(query)
         self._refresh_empty()
 
+    def set_message_scope(self, ids: list[str] | None) -> None:
+        self._model.set_message_scope(ids)
+        self._refresh_empty()
+
     def reload(self) -> None:
         self._model.reload()
         self._refresh_empty()
@@ -255,17 +290,25 @@ class GalleryView(QWidget):
         self._list.setVisible(n > 0)
         if n > 0:
             self._empty_hint.setVisible(False)
+            return
+        self._empty_hint.setVisible(True)
+        q = self._model.current_query()
+        scoped = self._model._scope_message_ids is not None  # benign peek
+        if q:
+            self._empty_hint.setText(
+                f"No charts matched “{q}”. Try a different phrase or "
+                "rebuild image embeddings in File → Build image (CLIP) embeddings…"
+            )
+        elif scoped:
+            self._empty_hint.setText(
+                "The current search has no matching charts. "
+                "Try a broader query, or switch to Visual mode."
+            )
         else:
-            self._empty_hint.setVisible(True)
-            q = self._model.current_query()
-            if q:
-                self._empty_hint.setText(
-                    f"No charts matched “{q}”. Make sure image embeddings are built."
-                )
-            else:
-                self._empty_hint.setText(
-                    "No charts yet — import a DCE export with attachments."
-                )
+            self._empty_hint.setText(
+                "Type a search above or switch mode to Visual — "
+                "matching charts will appear here."
+            )
 
     def _on_activated(self, idx: QModelIndex) -> None:
         mid = self._model.data(idx, ROLE_MESSAGE_ID)

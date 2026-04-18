@@ -11,11 +11,12 @@ import hashlib
 import re
 from pathlib import Path
 
-from PyQt6.QtCore import QModelIndex, QRect, QSize, Qt
+from PyQt6.QtCore import QModelIndex, QPoint, QRect, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import (
     QBrush,
     QColor,
     QFont,
+    QMouseEvent,
     QPainter,
     QPen,
     QPixmap,
@@ -93,10 +94,17 @@ def _avatar_letter(author: str) -> str:
 
 
 class MessageDelegate(QStyledItemDelegate):
+    # Emitted when a user clicks a chart thumbnail in a feed row.
+    thumbnail_clicked = pyqtSignal(str)   # absolute local path
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._match_terms: list[str] = []
         self._last_width: int = -1
+        # Last-known geometry of each painted row's thumbnails, keyed by
+        # (model row, y-within-list) — used in editorEvent to test clicks.
+        # We keep a lightweight cache of row → list[(QRect, path)].
+        self._row_thumb_rects: dict[int, list[tuple[QRect, str]]] = {}
 
     def set_match_terms(self, query: str) -> None:
         self._match_terms = _extract_terms(query)
@@ -195,7 +203,10 @@ class MessageDelegate(QStyledItemDelegate):
         # attachment thumbnails
         thumbs = _thumb_paths(msg)
         if thumbs:
-            _paint_thumbnails(painter, x, y, content_w, thumbs)
+            rects = _paint_thumbnails(painter, x, y, content_w, thumbs)
+            # Remember geometry in ABSOLUTE list coordinates so editorEvent
+            # can test click positions against it on the next mouse press.
+            self._row_thumb_rects[index.row()] = rects
 
         # bottom divider
         painter.setPen(QPen(COLOR_DIVIDER, 1))
@@ -207,6 +218,23 @@ class MessageDelegate(QStyledItemDelegate):
         )
 
         painter.restore()
+
+    # ------------------------------------------------------------------
+    # mouse handling — detect clicks on thumbnail rects
+    # ------------------------------------------------------------------
+    def editorEvent(self, event, model, option, index) -> bool:
+        if (
+            isinstance(event, QMouseEvent)
+            and event.type() == QMouseEvent.Type.MouseButtonRelease
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            rects = self._row_thumb_rects.get(index.row()) or []
+            pt = event.position().toPoint()
+            for rect, path in rects:
+                if rect.contains(pt):
+                    self.thumbnail_clicked.emit(path)
+                    return True
+        return super().editorEvent(event, model, option, index)
 
 
 # -----------------------------------------------------------------------------
@@ -319,21 +347,24 @@ def _paint_reply_line(
 
 def _paint_thumbnails(
     painter: QPainter, x: int, y: int, width: int, thumbs: list[str]
-) -> None:
+) -> list[tuple[QRect, str]]:
+    """Paint up to MAX_THUMBS thumbnails. Returns [(rect, path), ...] in the
+    same coordinate system as the painter so the delegate can hit-test clicks."""
     shown = thumbs[:MAX_THUMBS]
     extra = len(thumbs) - len(shown)
     cx = x
     row_top = y
+    hit_rects: list[tuple[QRect, str]] = []
     for path in shown:
         pix = _load_thumb(path)
         if pix is None or pix.isNull():
             continue
         scaled = _scale_for_thumb(pix, width)
         if cx + scaled.width() > x + width:
-            # wrap if we'd overflow
             cx = x
-            row_top = y  # Phase 2 stays single-row; overflow just clips
+            row_top = y
         painter.drawPixmap(cx, row_top, scaled)
+        hit_rects.append((QRect(cx, row_top, scaled.width(), scaled.height()), path))
         cx += scaled.width() + THUMB_GAP
 
     if extra > 0:
@@ -345,6 +376,8 @@ def _paint_thumbnails(
             f"+{extra} more",
         )
         painter.restore()
+
+    return hit_rects
 
 
 # -----------------------------------------------------------------------------
