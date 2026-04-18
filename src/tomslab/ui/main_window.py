@@ -156,6 +156,10 @@ class MainWindow(QMainWindow):
         self._ingest_youtube_action.triggered.connect(self._on_ingest_youtube)
         file_menu.addAction(self._ingest_youtube_action)
 
+        self._check_youtube_action = QAction("Check for &new Tom videos", self)
+        self._check_youtube_action.triggered.connect(self._on_check_new_youtube)
+        file_menu.addAction(self._check_youtube_action)
+
         settings_action = QAction("&Settings…", self)
         settings_action.setShortcut(QKeySequence("Ctrl+,"))
         settings_action.triggered.connect(self._open_settings)
@@ -859,6 +863,65 @@ class MainWindow(QMainWindow):
         self._refresh_status()
 
     # ---- YouTube / TomTube ingest -------------------------------------
+    def _on_check_new_youtube(self) -> None:
+        """Fast 'what's new?' check — just enumerate the channel, tell the
+        user how many new Tom videos exist, and offer to ingest only
+        those. No download / no transcribe until the user says OK."""
+        if self._video_worker is not None and self._video_worker.isRunning():
+            QMessageBox.information(self, "Already running",
+                                    "A YouTube ingest is already in progress.")
+            return
+        self._status_label.setText("Checking YouTube for new Tom videos…")
+        QApplication.processEvents()
+        try:
+            from tomslab.ingest.youtube import (
+                find_new_videos, upsert_video_rows,
+            )
+            title_filter = dbmod.get_setting(
+                self._conn, "youtube_title_filter", "tom b"
+            ) or "tom b"
+            new, existing = find_new_videos(self._conn, title_filter=title_filter)
+        except Exception as exc:
+            QMessageBox.critical(self, "Check failed", f"{type(exc).__name__}: {exc}")
+            self._refresh_status()
+            return
+
+        if not new:
+            QMessageBox.information(
+                self,
+                "You're up to date",
+                f"Checked the channel — {len(existing)} Tom video(s) already "
+                f"indexed, no new matches.",
+            )
+            self._refresh_status()
+            return
+
+        titles_preview = "\n".join(
+            f"  · {e.title[:80]}" + ("…" if len(e.title) > 80 else "")
+            for e in new[:8]
+        )
+        if len(new) > 8:
+            titles_preview += f"\n  … and {len(new) - 8} more"
+        reply = QMessageBox.question(
+            self,
+            "New Tom videos found",
+            f"<b>{len(new)} new Tom B video(s)</b> not yet indexed:"
+            f"<pre style='font-size:11px;'>{titles_preview}</pre>"
+            f"<p>Download + transcribe now? Each video runs ~10 min on your GPU "
+            f"and the pipeline is resumable.</p>",
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Ok,
+        )
+        if reply != QMessageBox.StandardButton.Ok:
+            self._refresh_status()
+            return
+
+        # Commit the new rows as 'pending' and kick off the worker — it will
+        # only process pending/failed rows, so the full re-enumeration that
+        # `_on_ingest_youtube` does isn't needed.
+        upsert_video_rows(self._conn, new)
+        self._on_ingest_youtube_start(f"{len(new)} new video(s)")
+
     def _on_ingest_youtube(self) -> None:
         if self._video_worker is not None and self._video_worker.isRunning():
             QMessageBox.information(self, "Already running",
@@ -885,9 +948,15 @@ class MainWindow(QMainWindow):
         if reply != QMessageBox.StandardButton.Ok:
             return
 
+        self._on_ingest_youtube_start("all pending videos")
+
+    def _on_ingest_youtube_start(self, label: str) -> None:
+        """Actually start the video worker. Shared by 'Import' (full
+        re-enumerate) and 'Check for new' (skip the enumerate, only
+        process already-queued pending rows)."""
         self._progress_bar.setVisible(True)
         self._progress_bar.setRange(0, 0)
-        self._status_label.setText("TomTube: starting…")
+        self._status_label.setText(f"TomTube: starting — {label}…")
 
         self._video_worker = VideoIngestWorker(
             model_name=dbmod.get_setting(self._conn, "whisper_model", "large-v3"),

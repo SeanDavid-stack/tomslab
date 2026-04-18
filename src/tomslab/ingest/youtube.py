@@ -129,6 +129,30 @@ def enumerate_channel(
 # ---------------------------------------------------------------------------
 # upsert into the videos table
 # ---------------------------------------------------------------------------
+def find_new_videos(
+    conn: sqlite3.Connection,
+    channel_url: str | None = None,
+    title_filter: str = "tom b",
+    limit: int | None = None,
+) -> tuple[list[VideoEntry], list[VideoEntry]]:
+    """Quick enumerate + split into (new, already-known). Doesn't touch disk.
+
+    Returns ``(new_entries, existing_entries)`` so the caller can ask the
+    user "3 new videos — ingest now?" without committing anything yet.
+    """
+    channel_url = channel_url or (
+        dbmod.get_setting(conn, "youtube_channel_url",
+                          "https://www.youtube.com/@Bookmap_pro/videos")
+    )
+    entries = enumerate_channel(channel_url, title_filter=title_filter, limit=limit)
+    existing_ids = {
+        r["id"] for r in conn.execute("SELECT id FROM videos")
+    }
+    new = [e for e in entries if e.id not in existing_ids]
+    old = [e for e in entries if e.id in existing_ids]
+    return new, old
+
+
 def upsert_video_rows(conn: sqlite3.Connection, entries: list[VideoEntry]) -> int:
     added = 0
     now = datetime.now(timezone.utc).isoformat()
