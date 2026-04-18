@@ -434,9 +434,25 @@ def ask(
             "type), call out visible reference prices (IB, VPOC, HVNs, LVNs, "
             "VWAP, naked VPOCs), read the order flow, and lay out a plausible "
             "entry / stop / target consistent with Tom's structured-trade "
-            "setups. If the attached chart resembles anything in the retrieved "
-            "'similar chart' sources, cite them. Then answer the user's "
-            "specific question:\n\n" + prompt_q
+            "setups.\n\n"
+            "**CRITICAL price-handling rules for this turn:**\n"
+            "1. Read every numeric price (current price, reference levels, "
+            "VPOCs, HVNs, LVNs, IB High/Low, target, stop) DIRECTLY FROM THE "
+            "IMAGE. The tooltip, the axis labels on the right margin, and the "
+            "candle prints are your only sources of truth for numbers.\n"
+            "2. The retrieved Tom messages below are from OTHER trading "
+            "sessions (often years ago). Their numeric prices belong to those "
+            "historical sessions and must NEVER be copied into this analysis "
+            "as if they were on the attached chart. Use retrieved messages "
+            "ONLY for framework concepts (how Tom defines 'initiative' vs "
+            "'responsive', what he looks for at an NVPOC, etc.), not for "
+            "price levels.\n"
+            "3. If you cannot clearly read a price from the image, say "
+            "\"not visible from this screenshot\" — do NOT guess a number, do "
+            "NOT substitute a number from a retrieved message.\n"
+            "4. When you cite a retrieved message, cite it for the CONCEPT "
+            "it teaches, not for its price numbers.\n\n"
+            "Then answer the user's specific question:\n\n" + prompt_q
         )
     messages.append({"role": "user", "content": build_user_prompt(prompt_q, sources)})
 
