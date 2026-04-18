@@ -184,9 +184,9 @@ class MainWindow(QMainWindow):
         hlay.setContentsMargins(16, 10, 16, 10)
         badge = QLabel("📒")
         badge.setStyleSheet("font-size: 20px;")
-        title = QLabel("<b>traders-lab-tom-b</b><br>"
+        title = QLabel("<b>Traders Lab</b> — <span style='color:#949BA4;'>traders-lab-tom-b</span><br>"
                        "<span style='color:#949BA4; font-size:11px;'>"
-                       "Bookmap · Tom B's structured trades, order flow, and auction theory</span>")
+                       "Bookmap Discord · Tom B's channel · reference PDFs live in the pinned section</span>")
         title.setStyleSheet("color: #F2F3F5; font-size: 14px;")
         hlay.addWidget(badge)
         hlay.addSpacing(12)
