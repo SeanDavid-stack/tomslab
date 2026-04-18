@@ -32,11 +32,26 @@ from tomslab.ui.chat_worker import ChatWorker
 
 
 SAMPLE_PROMPTS = [
+    # Concepts & definitions
     "What is a Mean Reversion Structured Trade?",
-    "How does Tom approach the opening?",
     "What does Tom mean by 'absorption at VPOC'?",
-    "What is the Initial Balance and why does it matter?",
+    "Explain Naked VPOC (NVPOC) and why Tom watches for it.",
+    "What's the difference between initiative and responsive activity?",
+    # Process / playbook
+    "How does Tom approach the opening?",
+    "Walk me through Tom's Initial Balance (IB) playbook.",
     "How does Tom handle overnight inventory imbalance?",
+    "What does Tom's Opening Context Alignment look like in practice?",
+    # Setups & tactics
+    "What are the conditions for an HVN break-and-reject setup?",
+    "How does Tom use VWAP and the Volume Profile together?",
+    "When does Tom fade an IB extension vs trade the continuation?",
+    # Tools / environment
+    "What subscriptions do I need to replicate Tom's Investor/RT charts?",
+    "How do I export market levels from Investor/RT to Bookmap cloud notes?",
+    # Mindset & risk
+    "Summarize Tom's risk-management rules from his posts.",
+    "What does Tom say about trading psychology during drawdowns?",
 ]
 
 

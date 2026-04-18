@@ -35,12 +35,16 @@ CHIP_STYLE = """
 """
 
 
+TOP_N_DEFAULT = 12   # default number of chips shown (the rest are behind "Show all")
+
+
 class ConceptChipBar(QWidget):
     concept_clicked = pyqtSignal(str)   # emits the term/abbreviation string
 
     def __init__(self, conn: sqlite3.Connection, parent=None) -> None:
         super().__init__(parent)
         self._conn = conn
+        self._expanded = False
         self._build_ui()
         self.reload()
 
@@ -88,17 +92,29 @@ class ConceptChipBar(QWidget):
         except Exception:
             rows = []
 
-        for i, r in enumerate(rows):
+        # Resolve each concept's most-searchable token and its mention count
+        # up-front so we can sort by frequency and show the heaviest-hitters
+        # first.  26 FTS5 COUNT(*) queries at ~5 ms each is ~130 ms total —
+        # fine at startup.
+        entries: list[tuple[str, str, str, int]] = []
+        for r in rows:
             name = r["name"] or ""
             desc = r["description"] or ""
             abbr = _abbr_from_description(desc)
             label = abbr or name
             search_term = abbr or name
+            n = _count_mentions(self._conn, search_term)
+            entries.append((name, desc, label, n))
 
-            # Count mentions in messages_fts (fast: FTS5 on 195K rows is <10ms).
-            n_mentions = _count_mentions(self._conn, search_term)
+        # Sort: most-mentioned first, ties alphabetically.  Keeps the top
+        # chips stable run-to-run.
+        entries.sort(key=lambda e: (-e[3], e[2].lower()))
+
+        show_n = len(entries) if self._expanded else min(TOP_N_DEFAULT, len(entries))
+        hidden = max(0, len(entries) - show_n)
+
+        for (name, desc, label, n_mentions) in entries[:show_n]:
             display = f"{label}  ·  {_fmt_count(n_mentions)}" if n_mentions else label
-
             btn = QPushButton(display)
             tooltip = f"<b>{name}</b>"
             if desc:
@@ -108,8 +124,29 @@ class ConceptChipBar(QWidget):
             btn.setToolTip(tooltip)
             btn.setStyleSheet(CHIP_STYLE)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            search_term = label
             btn.clicked.connect(lambda _checked, t=search_term: self.concept_clicked.emit(t))
             self._chips_layout.insertWidget(self._chips_layout.count() - 1, btn)
+
+        # Trailing "more" / "collapse" toggle.
+        if hidden > 0 and not self._expanded:
+            more = QPushButton(f"+ {hidden} more")
+            more.setStyleSheet(CHIP_STYLE)
+            more.setCursor(Qt.CursorShape.PointingHandCursor)
+            more.clicked.connect(self._on_toggle_expanded)
+            more.setToolTip(f"Show all {len(entries)} glossary terms")
+            self._chips_layout.insertWidget(self._chips_layout.count() - 1, more)
+        elif self._expanded and len(entries) > TOP_N_DEFAULT:
+            less = QPushButton("− collapse")
+            less.setStyleSheet(CHIP_STYLE)
+            less.setCursor(Qt.CursorShape.PointingHandCursor)
+            less.clicked.connect(self._on_toggle_expanded)
+            less.setToolTip("Show only the most-mentioned terms")
+            self._chips_layout.insertWidget(self._chips_layout.count() - 1, less)
+
+    def _on_toggle_expanded(self) -> None:
+        self._expanded = not self._expanded
+        self.reload()
 
     def count(self) -> int:
         return max(0, self._chips_layout.count() - 1)
