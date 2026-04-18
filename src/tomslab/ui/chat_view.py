@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from tomslab import bookmarks as bmmod
 from tomslab import chat as chatmod
 from tomslab.chat import AnswerResult, ChatTurn, CITATION_RE
 from tomslab.ui.chat_worker import ChatWorker
@@ -68,9 +69,28 @@ def _avatar_for(name: str) -> tuple[str, str]:
 
 
 class _InputBox(QTextEdit):
-    """Text input that submits on Ctrl+Enter / Cmd+Enter."""
+    """Text input that submits on Ctrl+Enter / Cmd+Enter and grows with content."""
 
     submit = pyqtSignal()
+
+    _MIN_H = 64
+    _MAX_H = 280
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setMinimumHeight(self._MIN_H)
+        self.setMaximumHeight(self._MAX_H)
+        self.document().documentLayout().documentSizeChanged.connect(self._autogrow)
+        self._autogrow()
+
+    def _autogrow(self) -> None:
+        # Account for frame + internal padding; QTextDocument height is
+        # the pixel height of the rendered text at the current width.
+        doc_h = int(self.document().size().height())
+        margin = 2 * (self.frameWidth() + 8)
+        target = max(self._MIN_H, min(self._MAX_H, doc_h + margin))
+        if target != self.height():
+            self.setFixedHeight(target)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         mods = event.modifiers()
@@ -164,7 +184,6 @@ class ChatView(QWidget):
         self._input.setPlaceholderText(
             "Ask Tom anything about his framework — Ctrl+Enter to send"
         )
-        self._input.setFixedHeight(82)
         self._input.setStyleSheet(
             f"QTextEdit {{ background: {COLOR_BG_ALT}; color: {COLOR_TEXT};"
             f" border: 1px solid {COLOR_BORDER}; border-radius: 10px;"
@@ -265,6 +284,15 @@ class ChatView(QWidget):
         labels = self._resolve_citation_labels(text)
         body = self._linkify_citations(text, labels)
         avatar = self._avatar_html("T", COLOR_AUTHOR_TOM)
+        # Each assistant turn gets a "Save answer" link in its footer —
+        # encodes the index in history so _on_anchor_clicked can look up
+        # the right (question, answer) pair to persist.
+        idx = len(self._history) - 1
+        save_footer = (
+            f'<div style="margin-left: 38px; margin-top: 6px;">'
+            f'<a href="save:{idx}" style="color: {COLOR_DIM}; text-decoration: none;'
+            f' font-size: 11px;">⭐ Save this answer</a></div>'
+        )
         return (
             '<div style="margin: 18px 0 10px 0;">'
             f'<div style="margin-bottom: 6px;">{avatar}'
@@ -274,6 +302,7 @@ class ChatView(QWidget):
             f' background: {COLOR_BG_ALT}; border-left: 3px solid {COLOR_AUTHOR_TOM};'
             f' border-radius: 8px; color: {COLOR_TEXT}; white-space: pre-wrap;'
             f' line-height: 1.55;">{body}</div>'
+            f'{save_footer}'
             '</div>'
         )
 
@@ -439,6 +468,7 @@ class ChatView(QWidget):
     def _on_answered(self, result: AnswerResult) -> None:
         self._worker = None
         self._last_answer_sources = result.sources
+        self._last_answer_citations = list(result.citations)
         self._history.append(ChatTurn(role="assistant", content=result.answer or "(no answer)"))
         self._render_transcript()
         self._set_busy(False)
@@ -485,10 +515,38 @@ class ChatView(QWidget):
             self._input.setPlainText(href[len("sample:"):])
             self._input.setFocus()
             return
+        if href.startswith("save:"):
+            self._save_answer(href[len("save:"):])
+            return
         m = re.match(r"^(msg|doc):(.+)$", href)
         if not m:
             return
         self.citation_clicked.emit(m.group(1), m.group(2))
+
+    def _save_answer(self, idx_str: str) -> None:
+        try:
+            idx = int(idx_str)
+        except ValueError:
+            return
+        if idx < 0 or idx >= len(self._history):
+            return
+        answer_turn = self._history[idx]
+        if answer_turn.role != "assistant":
+            return
+        # Find the nearest preceding user turn for the question.
+        question = ""
+        for j in range(idx - 1, -1, -1):
+            if self._history[j].role == "user":
+                question = self._history[j].content
+                break
+        citations = list(CITATION_RE.findall(answer_turn.content))
+        citation_strs = [f"{kind}:{raw}" for kind, raw in citations]
+        bmmod.save_chat_answer(
+            self._conn, question, answer_turn.content, citation_strs
+        )
+        self._status.setText(
+            f"⭐ Saved — view it in the Bookmarks tab · Ctrl+Enter to ask again"
+        )
 
 
 # ---------------------------------------------------------------------------

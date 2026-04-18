@@ -96,18 +96,41 @@ def _avatar_letter(author: str) -> str:
 class MessageDelegate(QStyledItemDelegate):
     # Emitted when a user clicks a chart thumbnail in a feed row.
     thumbnail_clicked = pyqtSignal(str)   # absolute local path
+    bookmark_toggled = pyqtSignal(str, bool)   # (message_id, is_now_bookmarked)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._match_terms: list[str] = []
         self._last_width: int = -1
-        # Last-known geometry of each painted row's thumbnails, keyed by
-        # (model row, y-within-list) — used in editorEvent to test clicks.
-        # We keep a lightweight cache of row → list[(QRect, path)].
         self._row_thumb_rects: dict[int, list[tuple[QRect, str]]] = {}
+        self._row_star_rects: dict[int, QRect] = {}   # click target for bookmark
+        # Flash-on-jump state: when MainWindow navigates to a row we paint a
+        # gold overlay for a short window, then it fades out.
+        self._flash_row_id: str | None = None   # message id to flash
+        self._flash_started_ms: int = 0
+        # Which message ids are currently bookmarked (hot cache populated by
+        # MainWindow); missing = not bookmarked.
+        self._bookmarked: set[str] = set()
 
     def set_match_terms(self, query: str) -> None:
         self._match_terms = _extract_terms(query)
+
+    def flash_message(self, message_id: str) -> None:
+        from PyQt6.QtCore import QDateTime
+        self._flash_row_id = str(message_id) if message_id else None
+        self._flash_started_ms = QDateTime.currentMSecsSinceEpoch()
+
+    def clear_flash(self) -> None:
+        self._flash_row_id = None
+
+    def flash_active(self) -> bool:
+        if not self._flash_row_id:
+            return False
+        from PyQt6.QtCore import QDateTime
+        return QDateTime.currentMSecsSinceEpoch() - self._flash_started_ms < 2200
+
+    def set_bookmarks(self, ids: set[str]) -> None:
+        self._bookmarked = set(ids)
 
     # ------------------------------------------------------------------
     # sizing
@@ -208,6 +231,9 @@ class MessageDelegate(QStyledItemDelegate):
             # can test click positions against it on the next mouse press.
             self._row_thumb_rects[index.row()] = rects
 
+        # star (bookmark) in the top-right corner of the card
+        self._row_star_rects[index.row()] = self._paint_star(painter, rect, msg)
+
         # bottom divider
         painter.setPen(QPen(COLOR_DIVIDER, 1))
         painter.drawLine(
@@ -217,10 +243,48 @@ class MessageDelegate(QStyledItemDelegate):
             rect.bottom(),
         )
 
+        # Flash overlay — when MainWindow navigates us here, pulse a gold
+        # border for ~2s so the user sees which row they landed on.
+        if (
+            msg.id
+            and self._flash_row_id
+            and msg.id == self._flash_row_id
+            and self.flash_active()
+        ):
+            painter.save()
+            painter.setPen(QPen(COLOR_GOLD, 3))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(rect.adjusted(1, 1, -2, -2))
+            painter.restore()
+
         painter.restore()
 
     # ------------------------------------------------------------------
-    # mouse handling — detect clicks on thumbnail rects
+    # star painter (used for bookmark hit-testing)
+    # ------------------------------------------------------------------
+    def _paint_star(self, painter: QPainter, rect: QRect, msg: MessageRow) -> QRect:
+        # Doc rows don't get the star (nothing to bookmark on a doc).
+        if msg.doc_meta is not None or not msg.id:
+            return QRect()
+        star_size = 22
+        x = rect.right() - PAD_X - star_size
+        y = rect.y() + PAD_Y
+        is_on = msg.id in self._bookmarked
+        painter.save()
+        f = QFont(painter.font())
+        f.setPointSizeF(max(f.pointSizeF() + 4, 13))
+        painter.setFont(f)
+        painter.setPen(COLOR_GOLD if is_on else COLOR_TEXT_DIM)
+        painter.drawText(
+            QRect(x, y, star_size, star_size),
+            int(Qt.AlignmentFlag.AlignCenter),
+            "★" if is_on else "☆",
+        )
+        painter.restore()
+        return QRect(x, y, star_size, star_size)
+
+    # ------------------------------------------------------------------
+    # mouse handling — detect clicks on thumbnail / star rects
     # ------------------------------------------------------------------
     def editorEvent(self, event, model, option, index) -> bool:
         if (
@@ -228,8 +292,20 @@ class MessageDelegate(QStyledItemDelegate):
             and event.type() == QMouseEvent.Type.MouseButtonRelease
             and event.button() == Qt.MouseButton.LeftButton
         ):
-            rects = self._row_thumb_rects.get(index.row()) or []
             pt = event.position().toPoint()
+            # Star takes priority so it's clickable even over any overlap.
+            star_rect = self._row_star_rects.get(index.row())
+            if star_rect and star_rect.isValid() and star_rect.contains(pt):
+                msg: MessageRow | None = index.data(ROLE_MESSAGE)
+                if msg and msg.id and msg.doc_meta is None:
+                    now_on = msg.id not in self._bookmarked
+                    if now_on:
+                        self._bookmarked.add(msg.id)
+                    else:
+                        self._bookmarked.discard(msg.id)
+                    self.bookmark_toggled.emit(msg.id, now_on)
+                    return True
+            rects = self._row_thumb_rects.get(index.row()) or []
             for rect, path in rects:
                 if rect.contains(pt):
                     self.thumbnail_clicked.emit(path)
@@ -294,6 +370,10 @@ def _paint_header(
     display = msg.author_nickname or msg.author_name or "?"
     if is_doc:
         display = f"📄 {display}"
+    elif msg.is_featured_speaker:
+        # Tom gets a small "Author" pill appended to his name so new users
+        # know he's the primary subject of the corpus, not just another user.
+        display = f"{display}  ✦ Author"
     fm = painter.fontMetrics()
     name_rect = QRect(x, y, width, HEADER_H)
     painter.drawText(
@@ -498,7 +578,51 @@ def _calc_thumb_row_height(thumbs: list[str], width: int) -> int:
 # timestamp helper
 # -----------------------------------------------------------------------------
 def _fmt_timestamp(ts: str) -> str:
-    # ISO 8601 -> "YYYY-MM-DD HH:MM"
+    """Return "Mon D, YYYY · Na ago" when possible, falling back to the
+    ISO minute-precision form. Human-friendly without being noisy."""
     if not ts:
         return ""
-    return ts[:16].replace("T", " ")
+    iso = ts[:16].replace("T", " ")
+    rel = _relative_from_iso(ts)
+    return f"{iso}  ·  {rel}" if rel else iso
+
+
+_MONTHS_SHORT = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                 "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def _relative_from_iso(ts: str) -> str:
+    """Return a short relative time like "2y ago" or "3mo ago". Empty on error."""
+    try:
+        from datetime import datetime, timezone
+        # Accept trailing offset or Z.
+        s = ts.strip()
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        delta = now - dt
+        secs = int(delta.total_seconds())
+        if secs < 60:
+            return "just now"
+        mins = secs // 60
+        if mins < 60:
+            return f"{mins}m ago"
+        hrs = mins // 60
+        if hrs < 24:
+            return f"{hrs}h ago"
+        days = hrs // 24
+        if days < 30:
+            return f"{days}d ago"
+        months = days // 30
+        if months < 12:
+            return f"{months}mo ago"
+        years = days // 365
+        extra_months = (days % 365) // 30
+        if extra_months:
+            return f"{years}y {extra_months}mo ago"
+        return f"{years}y ago"
+    except Exception:
+        return ""

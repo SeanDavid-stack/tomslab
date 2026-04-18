@@ -95,12 +95,16 @@ class GalleryModel(QAbstractListModel):
         if role == Qt.ItemDataRole.DecorationRole:
             return _load_thumb_icon(item.local_path)
         if role == Qt.ItemDataRole.ToolTipRole:
+            when = item.timestamp[:19].replace("T", " ")
+            star = " ✦ Author" if item.is_featured_speaker else ""
             tip = [
-                f"<b>{item.author}</b>  {item.timestamp[:19].replace('T', ' ')}",
-                item.filename,
+                f"<b>{item.author}{star}</b>",
+                f"{when}",
+                f"<code>{item.filename}</code>",
             ]
             if item.score is not None:
-                tip.append(f"score: {item.score:.3f}")
+                tip.append(f"CLIP score: {item.score:.3f}")
+            tip.append("<i>Double-click to open full-size</i>")
             return "<br>".join(tip)
         if role == ROLE_MESSAGE_ID:
             return item.message_id

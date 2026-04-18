@@ -37,9 +37,14 @@ PER_DOC_CAP = 1       # 1 page per document in the top-K doc slice so a single
 CONTEXT_CHAR_CAP = 700  # per retrieved snippet
 
 
-SYSTEM_PROMPT = """\
+SYSTEM_PROMPT_BASE = """\
 You are Tom's Lab — an expert study assistant for trader Tom B's teachings on
 Bookmap order flow, volume profile, and auction market theory.
+
+Corpus window: the Discord posts in this database span **December 2021 through
+August 2023**. Interpret "recently" and similar time words within that window;
+anything after August 2023 is not available here and should be acknowledged
+plainly if asked.
 
 How to answer:
 - Synthesize a helpful answer from the retrieved sources. Tom's Discord posts
@@ -53,7 +58,42 @@ How to answer:
   the closest relevant context and say which part is inferred. Only refuse
   ("The sources don't cover this") when there is truly nothing relevant.
 - Keep answers focused. Short paragraphs or bullets. No "Certainly!" preambles.
+- When the user uses a Tom-framework abbreviation (VPOC, NVPOC, IB, RTH, etc.)
+  treat it as the expanded glossary meaning below — never guess what it could
+  mean or invent a different expansion.
 """
+
+
+def _glossary_block(conn: sqlite3.Connection) -> str:
+    """Render the concepts table as a compact glossary for the system prompt.
+
+    Seeds the model with the *exact* expansions Tom uses so it never invents
+    "Inside Bid Limit" for IBL, and never stalls on NVPOC.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT name, description FROM concepts ORDER BY name"
+        ).fetchall()
+    except Exception:
+        return ""
+    if not rows:
+        return ""
+    lines = ["Tom's glossary (authoritative — use these expansions):"]
+    for r in rows:
+        name = (r["name"] or "").strip()
+        desc = (r["description"] or "").strip()
+        if not name:
+            continue
+        # "(ABBR) definition" or just "definition" — keep as-is
+        lines.append(f"- {name}: {desc}" if desc else f"- {name}")
+    return "\n".join(lines)
+
+
+def build_system_prompt(conn: sqlite3.Connection) -> str:
+    glossary = _glossary_block(conn)
+    if not glossary:
+        return SYSTEM_PROMPT_BASE
+    return SYSTEM_PROMPT_BASE + "\n" + glossary + "\n"
 
 
 @dataclass
@@ -314,7 +354,7 @@ def ask(
     # 3) call provider
     provider = registry.get_chat_provider(conn)
     try:
-        answer = provider.chat(messages, system=SYSTEM_PROMPT)
+        answer = provider.chat(messages, system=build_system_prompt(conn))
     except (ProviderError, ProviderUnavailable) as exc:
         raise RuntimeError(f"Chat provider error: {exc}") from exc
 

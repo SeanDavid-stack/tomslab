@@ -41,6 +41,8 @@ from tomslab import embed_service, image_embed_service, semantic, visual
 from tomslab.ingest.importer import ImportResult
 from tomslab.paths import database_path
 from tomslab.search import SearchMode
+from tomslab import bookmarks as bmmod
+from tomslab.ui.bookmarks_view import BookmarksView
 from tomslab.ui.chat_view import ChatView
 from tomslab.ui.concept_bar import ConceptChipBar
 from tomslab.ui.detail_dialog import DetailDialog
@@ -83,9 +85,14 @@ class MainWindow(QMainWindow):
         self._conn = dbmod.connect()
         dbmod.initialise(self._conn)
 
+        # Bookmarks schema (idempotent, fast)
+        bmmod.ensure_schema(self._conn)
+
         self._model = MessageListModel(self._conn, self)
         self._delegate = MessageDelegate(self)
         self._delegate.thumbnail_clicked.connect(self._open_image_viewer)
+        self._delegate.bookmark_toggled.connect(self._on_bookmark_toggled)
+        self._delegate.set_bookmarks(bmmod.all_message_ids(self._conn))
         self._worker: ImportWorker | None = None
         self._embed_worker: EmbedWorker | None = None
         self._image_embed_worker: ImageEmbedWorker | None = None
@@ -299,9 +306,15 @@ class MainWindow(QMainWindow):
             "QTabBar::tab { background: #2B2D31; color: #DBDEE1; padding: 6px 14px; border: none; }"
             "QTabBar::tab:selected { background: #5865F2; color: white; }"
         )
+        # --- bookmarks tab ---------------------------------------------
+        self._bookmarks = BookmarksView(self._conn, self)
+        self._bookmarks.message_activated.connect(self._jump_to_message)
+        self._bookmarks.citation_clicked.connect(self._on_citation)
+
         self._tabs.addTab(self._list, "Feed")
         self._tabs.addTab(self._gallery, "Gallery")
         self._tabs.addTab(self._chat, "Ask Tom")
+        self._tabs.addTab(self._bookmarks, "Bookmarks")
         self._tabs.currentChanged.connect(self._on_tab_changed)
         outer.addWidget(self._tabs, stretch=1)
 
@@ -450,7 +463,21 @@ class MainWindow(QMainWindow):
                 self._gallery.set_query(self._search.text().strip())
             else:
                 self._gallery.set_query("")
+        elif idx == 3:   # Bookmarks tab
+            self._bookmarks.reload()
         self._refresh_status()
+
+    # ------------------------------------------------------------------
+    # bookmarks
+    # ------------------------------------------------------------------
+    def _on_bookmark_toggled(self, message_id: str, now_on: bool) -> None:
+        bmmod.toggle_message(self._conn, message_id)
+        self._delegate.set_bookmarks(bmmod.all_message_ids(self._conn))
+        # Repaint only the affected area.
+        self._list.viewport().update()
+        # If the Bookmarks tab is currently visible, refresh it.
+        if self._tabs.currentIndex() == 3:
+            self._bookmarks.reload()
 
     # ------------------------------------------------------------------
     # gallery → feed jump
@@ -497,16 +524,26 @@ class MainWindow(QMainWindow):
         self._tabs.setCurrentIndex(0)
 
         # Scan loaded pages for the message; fetch more if needed.
-        target = self._find_row(message_id, load_pages=10)
+        target = self._find_row(message_id, load_pages=40)
         if target is not None:
             self._list.scrollTo(
                 self._model.index(target, 0),
                 hint=QListView.ScrollHint.PositionAtCenter,
             )
             self._list.setCurrentIndex(self._model.index(target, 0))
+            # Pulse the target gold for ~2s so the user sees where they landed.
+            self._delegate.flash_message(message_id)
+            self._list.viewport().update()
+            # Schedule a repaint when the flash window elapses to clear it.
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(2300, self._clear_flash)
         else:
             # Fall back to a modal dialog with the message's content.
             self._show_message_detail(message_id)
+
+    def _clear_flash(self) -> None:
+        self._delegate.clear_flash()
+        self._list.viewport().update()
 
     def _find_row(self, message_id: str, load_pages: int) -> int | None:
         for _ in range(max(1, load_pages)):
@@ -780,11 +817,14 @@ class MainWindow(QMainWindow):
         clip_pre = dbmod.get_setting(self._conn, "clip_pretrained", "openai") or "openai"
         pending_img = visual.pending_count(self._conn, f"{clip_name}:{clip_pre}")
         notes: list[str] = []
-        if pending_text > 0:
+        # Hide tiny residuals — a single corrupt PNG will sit as "1 chart
+        # pending" forever because preprocess rejects it on every retry.
+        # Only surface when the backlog is actually meaningful.
+        if pending_text > 5:
             notes.append(f"{pending_text:,} windows need text embeddings")
-        if pending_doc > 0:
+        if pending_doc > 5:
             notes.append(f"{pending_doc:,} doc pages need text embeddings")
-        if pending_img > 0:
+        if pending_img > 5:
             notes.append(f"{pending_img:,} charts need CLIP embeddings")
         embed_note = "   ·   " + "; ".join(notes) if notes else ""
 
