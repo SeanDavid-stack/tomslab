@@ -156,7 +156,20 @@ class AnswerResult:
     fallback_reason: str = ""              # populated when we had to fall back
 
 
-CITATION_RE = re.compile(r"\[(msg|doc):([\w:\-]+)\]")
+CITATION_RE = re.compile(r"\[(msg|doc|vid):([\w:\-]+)\]")
+
+
+def _fmt_timestamp(sec: float) -> str:
+    m = int(sec // 60)
+    s = int(sec % 60)
+    return f"{m}:{s:02d}"
+
+
+def _youtube_link(video_url: str, start_sec: float) -> str:
+    if not video_url:
+        return ""
+    sep = "&" if "?" in video_url else "?"
+    return f"{video_url}{sep}t={int(max(0, start_sec))}s"
 
 
 # ---------------------------------------------------------------------------
@@ -199,23 +212,34 @@ def retrieve(conn: sqlite3.Connection, question: str) -> list[RetrievedSource]:
             discord_ids.append(mid)
             seen_mid.add(mid)
 
-    # ---- Docs: semantic (existing mixed path, per-doc capped) -----------
+    # ---- Docs + videos: semantic (mixed path, per-doc capped) ---------
     try:
         mixed = semantic.mixed_semantic_search(conn, question, limit=200)
     except Exception as exc:
         log.warning("mixed_semantic_search unavailable (keyword-only docs): %s", exc)
         mixed = []
     sem_doc_page_ids: list[int] = []
+    video_hits: list = []
     per_doc: dict[int, int] = {}
+    per_video: dict[str, int] = {}
+    K_VIDEOS = 4        # top video chunks per turn
+    PER_VIDEO_CAP = 1   # at most one chunk per video in the top-K
     for h in mixed:
-        if h.source_type != "doc_page":
-            continue
-        did = h.doc_page.document_id
-        if per_doc.get(did, 0) >= PER_DOC_CAP:
-            continue
-        per_doc[did] = per_doc.get(did, 0) + 1
-        sem_doc_page_ids.append(h.doc_page.page_id)
-        if len(sem_doc_page_ids) >= K_DOCS_SEM:
+        if h.source_type == "doc_page":
+            did = h.doc_page.document_id
+            if per_doc.get(did, 0) >= PER_DOC_CAP:
+                continue
+            per_doc[did] = per_doc.get(did, 0) + 1
+            sem_doc_page_ids.append(h.doc_page.page_id)
+        elif h.source_type == "video_chunk":
+            if len(video_hits) >= K_VIDEOS:
+                continue
+            vid = h.video.video_id
+            if per_video.get(vid, 0) >= PER_VIDEO_CAP:
+                continue
+            per_video[vid] = per_video.get(vid, 0) + 1
+            video_hits.append(h)
+        if len(sem_doc_page_ids) >= K_DOCS_SEM and len(video_hits) >= K_VIDEOS:
             break
 
     # ---- Docs: keyword overlap (surfaces rare literal terms) -----------
@@ -286,6 +310,35 @@ def retrieve(conn: sqlite3.Connection, question: str) -> list[RetrievedSource]:
                     score=0.0,
                     message_id=r["id"],
                 ))
+
+    # ---- Video chunks (Tom's YouTube teaching) ------------------------
+    # Add as RetrievedSource rows with citation_id "vid:<chunk_id>" so the
+    # model can cite them inline. Keep text snippet bounded like docs.
+    for h in video_hits:
+        v = h.video
+        if v is None:
+            continue
+        row = conn.execute(
+            "SELECT text FROM video_chunks WHERE id = ?",
+            (v.chunk_id,),
+        ).fetchone()
+        if row is None:
+            continue
+        text = (row["text"] or "").strip()
+        if not text:
+            continue
+        if len(text) > CONTEXT_CHAR_CAP:
+            text = text[: CONTEXT_CHAR_CAP - 1].rstrip() + "…"
+        when = _fmt_timestamp(v.start_sec)
+        title_short = v.video_title[:60] + ("…" if len(v.video_title) > 60 else "")
+        out.append(RetrievedSource(
+            kind="video_chunk",
+            citation_id=f"vid:{v.chunk_id}",
+            author=f"Tom video  ·  {title_short}",
+            when=when,
+            text=text,
+            score=h.score,
+        ))
 
     # Fetch doc page text for doc hits
     if doc_page_ids:

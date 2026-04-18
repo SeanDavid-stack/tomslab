@@ -185,6 +185,50 @@ CREATE TABLE IF NOT EXISTS doc_page_image_embeddings (
 );
 CREATE INDEX IF NOT EXISTS idx_doc_page_img_embed_model ON doc_page_image_embeddings(model);
 
+-- ---- YouTube videos (Phase 7.5) --------------------------------------------
+-- One row per ingested video. source_channel is the @handle we scraped
+-- from.  audio_path is the on-disk MP3 we transcribed from and (by
+-- policy) keep so future Whisper upgrades can reprocess without re-
+-- downloading. transcript_status tracks resume state across restarts.
+CREATE TABLE IF NOT EXISTS videos (
+    id TEXT PRIMARY KEY,              -- YouTube video id (11 chars)
+    title TEXT,
+    url TEXT,
+    source_channel TEXT,
+    published_at TEXT,                -- ISO, may be approximate from yt-dlp
+    duration_sec INTEGER,
+    audio_path TEXT,
+    transcript_status TEXT,           -- 'pending' | 'downloaded' | 'transcribed' | 'failed'
+    transcript_error TEXT,
+    summary TEXT,
+    added_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_videos_status ON videos(transcript_status);
+CREATE INDEX IF NOT EXISTS idx_videos_channel ON videos(source_channel);
+
+-- Transcript chunks — one row per ~90-second semantic window; carries
+-- start/end offsets so citations can open YouTube at the exact second.
+CREATE TABLE IF NOT EXISTS video_chunks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    video_id TEXT NOT NULL,
+    chunk_index INTEGER,
+    start_sec REAL,
+    end_sec REAL,
+    text TEXT,
+    FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_video_chunks_video ON video_chunks(video_id);
+
+CREATE TABLE IF NOT EXISTS video_chunk_embeddings (
+    chunk_id INTEGER PRIMARY KEY,
+    model TEXT NOT NULL,
+    dim INTEGER NOT NULL,
+    embedding BLOB NOT NULL,
+    generated_at TEXT,
+    FOREIGN KEY (chunk_id) REFERENCES video_chunks(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_video_chunk_embed_model ON video_chunk_embeddings(model);
+
 -- ---- imports log (so we can resume / show history) -------------------------
 CREATE TABLE IF NOT EXISTS imports (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -264,6 +308,17 @@ DEFAULT_SETTINGS: dict[str, str] = {
     # emoji-only messages, etc. Tom's own messages and messages with
     # attachments are always kept. Toggle via the header button.
     "hide_feed_noise": "1",
+    # YouTube (TomTube) ingest defaults. Channel is Bookmap's — Tom posts
+    # there alongside other educators; the title filter narrows to his work.
+    "youtube_channel_url": "https://www.youtube.com/@Bookmap_pro/videos",
+    "youtube_title_filter": "tom b",
+    "youtube_audio_bitrate": "96",
+    # Browser to read YouTube session cookies from. YouTube blocks
+    # anonymous downloads on many videos (bot gate). yt-dlp uses the
+    # logged-in session from one of: chrome, edge, firefox, brave,
+    # opera, vivaldi. Empty string = don't send cookies.
+    "youtube_browser_cookies": "chrome",
+    "whisper_model": "large-v3",
     "schema_version": "1",
 }
 

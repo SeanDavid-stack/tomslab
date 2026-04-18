@@ -35,13 +35,27 @@ class DocSemanticHit:
 
 
 @dataclass
+class VideoSemanticHit:
+    """A semantic hit that points at a timestamped chunk of a YouTube video."""
+    chunk_id: int
+    video_id: str
+    video_title: str
+    video_url: str
+    start_sec: float
+    end_sec: float
+    score: float
+
+
+@dataclass
 class MixedSemanticHit:
-    source_type: str   # 'message' | 'doc_page'
+    source_type: str   # 'message' | 'doc_page' | 'video_chunk'
     score: float
     # populated for 'message'
     message_id: str | None = None
     # populated for 'doc_page'
     doc_page: DocSemanticHit | None = None
+    # populated for 'video_chunk'
+    video: VideoSemanticHit | None = None
 
 
 class _Cache:
@@ -189,6 +203,90 @@ class _DocCache:
 
 
 _doc_cache = _DocCache()
+
+
+class _VideoCache:
+    """Cached CLIP-ish matrix for Tom's YouTube chunks (text embeddings)."""
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.signature: tuple | None = None
+        self.matrix: np.ndarray | None = None
+        self.chunk_ids: list[int] | None = None
+        self.meta: list[dict] | None = None   # doc-like metadata per row
+
+
+_video_cache = _VideoCache()
+
+
+def invalidate_video_cache() -> None:
+    with _video_cache.lock:
+        _video_cache.signature = None
+        _video_cache.matrix = None
+        _video_cache.chunk_ids = None
+        _video_cache.meta = None
+
+
+def _current_video_signature(conn: sqlite3.Connection) -> tuple:
+    row = conn.execute(
+        "SELECT COUNT(*) AS n, MAX(generated_at) AS t FROM video_chunk_embeddings"
+    ).fetchone()
+    return (int(row["n"] or 0), row["t"] or "")
+
+
+def videos_available(conn: sqlite3.Connection) -> bool:
+    return _current_video_signature(conn)[0] > 0
+
+
+def _load_video_matrix(conn: sqlite3.Connection) -> bool:
+    sig = _current_video_signature(conn)
+    if _video_cache.signature == sig and _video_cache.matrix is not None:
+        return True
+    if sig[0] == 0:
+        _video_cache.signature = sig
+        _video_cache.matrix = None
+        return False
+
+    rows = conn.execute(
+        """
+        SELECT ve.chunk_id AS cid, ve.dim AS dim, ve.embedding AS blob,
+               c.video_id AS vid, c.start_sec AS ss, c.end_sec AS es,
+               v.title AS title, v.url AS url
+          FROM video_chunk_embeddings ve
+          JOIN video_chunks c ON c.id = ve.chunk_id
+          JOIN videos v ON v.id = c.video_id
+        """
+    ).fetchall()
+    if not rows:
+        _video_cache.signature = sig
+        _video_cache.matrix = None
+        return False
+
+    dim = int(rows[0]["dim"])
+    n = len(rows)
+    mat = np.empty((n, dim), dtype=np.float32)
+    cids = [0] * n
+    meta: list[dict] = [{}] * n
+    for i, r in enumerate(rows):
+        v = np.frombuffer(r["blob"], dtype=np.float32)
+        if v.size != dim:
+            v = v[:dim] if v.size > dim else np.pad(v, (0, dim - v.size))
+        mat[i] = v
+        cids[i] = int(r["cid"])
+        meta[i] = {
+            "video_id": r["vid"],
+            "start_sec": float(r["ss"] or 0),
+            "end_sec": float(r["es"] or 0),
+            "title": r["title"] or "",
+            "url": r["url"] or "",
+        }
+    norms = np.linalg.norm(mat, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    mat /= norms
+    _video_cache.signature = sig
+    _video_cache.matrix = mat
+    _video_cache.chunk_ids = cids
+    _video_cache.meta = meta
+    return True
 
 
 def invalidate_doc_cache() -> None:
@@ -360,6 +458,38 @@ def mixed_semantic_search(
                     title=meta["title"],
                     author=meta["author"],
                     score=float(scores[int(i)]),
+                ),
+            ))
+
+    # ---- video chunks -------------------------------------------------
+    with _video_cache.lock:
+        _load_video_matrix(conn)
+        v_mat = _video_cache.matrix
+        v_meta = _video_cache.meta
+        v_cids = _video_cache.chunk_ids
+
+    if v_mat is not None and v_meta is not None and v_cids is not None \
+            and q.size == v_mat.shape[1]:
+        # Tom B's own spoken teaching — give a strong boost, same tier as
+        # his authored PDFs, so video chunks surface when relevant.
+        vscores = v_mat @ q + 0.18
+        k = min(limit, vscores.size)
+        top = np.argpartition(-vscores, k - 1)[:k]
+        top = top[np.argsort(-vscores[top])]
+        for i in top:
+            idx = int(i)
+            m = v_meta[idx]
+            hits.append(MixedSemanticHit(
+                source_type="video_chunk",
+                score=float(vscores[idx]),
+                video=VideoSemanticHit(
+                    chunk_id=v_cids[idx],
+                    video_id=m["video_id"],
+                    video_title=m["title"],
+                    video_url=m["url"],
+                    start_sec=m["start_sec"],
+                    end_sec=m["end_sec"],
+                    score=float(vscores[idx]),
                 ),
             ))
 

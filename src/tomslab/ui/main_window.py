@@ -55,6 +55,8 @@ from tomslab.ui.import_worker import ImportWorker
 from tomslab.ui.message_delegate import MessageDelegate
 from tomslab.ui.message_model import MAX_BROWSE_ROWS, MessageListModel, ROLE_MESSAGE
 from tomslab.ui.settings_dialog import SettingsDialog
+from tomslab.ui.video_view import TomTubeView
+from tomslab.ui.video_worker import VideoIngestWorker
 
 
 # cap the image cache so 10K messages worth of charts don't eat all RAM
@@ -99,6 +101,7 @@ class MainWindow(QMainWindow):
         self._image_embed_worker: ImageEmbedWorker | None = None
         self._image_viewer: ImageViewerDialog | None = None
         self._detail_dialog: DetailDialog | None = None
+        self._video_worker: VideoIngestWorker | None = None
 
         self._search_debounce = QTimer(self)
         self._search_debounce.setSingleShot(True)
@@ -148,6 +151,10 @@ class MainWindow(QMainWindow):
         self._build_image_embed_action = QAction("Build &image (CLIP) embeddings…", self)
         self._build_image_embed_action.triggered.connect(self._on_build_image_embeddings)
         file_menu.addAction(self._build_image_embed_action)
+
+        self._ingest_youtube_action = QAction("Import &YouTube (TomTube)…", self)
+        self._ingest_youtube_action.triggered.connect(self._on_ingest_youtube)
+        file_menu.addAction(self._ingest_youtube_action)
 
         settings_action = QAction("&Settings…", self)
         settings_action.setShortcut(QKeySequence("Ctrl+,"))
@@ -320,6 +327,9 @@ class MainWindow(QMainWindow):
         self._docs = DocsView(self._conn, self)
         self._docs.page_opened.connect(self._open_image_viewer)
 
+        # --- tomtube tab ----------------------------------------------
+        self._tomtube = TomTubeView(self._conn, self)
+
         # Tab order — most-used surfaces first. Ask Tom is where people
         # actually go; Gallery is the fast visual scan; Feed is raw-read
         # when you need a specific conversation; Docs is reference; Bookmarks
@@ -328,6 +338,7 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._gallery, "Gallery")
         self._tabs.addTab(self._list, "Feed")
         self._tabs.addTab(self._docs, "Docs")
+        self._tabs.addTab(self._tomtube, "TomTube")
         self._tabs.addTab(self._bookmarks, "Bookmarks")
         self._tabs.currentChanged.connect(self._on_tab_changed)
         outer.addWidget(self._tabs, stretch=1)
@@ -478,6 +489,8 @@ class MainWindow(QMainWindow):
                 self._gallery.set_query("")
         elif cur is self._docs:
             self._docs.reload()
+        elif cur is self._tomtube:
+            self._tomtube.reload()
         elif cur is self._bookmarks:
             self._bookmarks.reload()
         self._refresh_status()
@@ -802,6 +815,76 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "Image embedding failed", err)
         self._refresh_status()
 
+    # ---- YouTube / TomTube ingest -------------------------------------
+    def _on_ingest_youtube(self) -> None:
+        if self._video_worker is not None and self._video_worker.isRunning():
+            QMessageBox.information(self, "Already running",
+                                    "A YouTube ingest is already in progress.")
+            return
+        reply = QMessageBox.question(
+            self,
+            "Import YouTube (TomTube)",
+            "<b>This will:</b>"
+            "<ul>"
+            "<li>Scrape the Bookmap YouTube channel for videos tagged 'Tom B'</li>"
+            "<li>Download each video's audio (~10–15 MB each at 96 kbps)</li>"
+            "<li>Transcribe locally with faster-whisper on your GPU (~10× realtime)</li>"
+            "<li>Chunk the transcripts and embed them for Ask Tom</li>"
+            "</ul>"
+            "<p>It uses your logged-in Chrome session cookies to bypass "
+            "YouTube's bot gate. <b>Expect this to run for hours</b> — "
+            "the pipeline is resumable, so you can close the app and it "
+            "picks up where it left off next time.</p>"
+            "<p><b>Proceed?</b></p>",
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Ok,
+        )
+        if reply != QMessageBox.StandardButton.Ok:
+            return
+
+        self._progress_bar.setVisible(True)
+        self._progress_bar.setRange(0, 0)
+        self._status_label.setText("TomTube: starting…")
+
+        self._video_worker = VideoIngestWorker(
+            model_name=dbmod.get_setting(self._conn, "whisper_model", "large-v3"),
+            bitrate_kbps=int(dbmod.get_setting(self._conn, "youtube_audio_bitrate", "96") or "96"),
+            parent=self,
+        )
+        self._video_worker.progress.connect(self._on_video_progress)
+        self._video_worker.finished_ok.connect(self._on_video_finished)
+        self._video_worker.failed.connect(self._on_video_failed)
+        self._video_worker.start()
+
+    def _on_video_progress(self, stage: str, current: int, total: int) -> None:
+        if total > 0:
+            self._progress_bar.setRange(0, total)
+            self._progress_bar.setValue(current)
+            self._status_label.setText(f"TomTube: {stage}  ({current:,}/{total:,})")
+        else:
+            self._status_label.setText(f"TomTube: {stage}")
+
+    def _on_video_finished(self, report: object) -> None:
+        self._progress_bar.setVisible(False)
+        self._video_worker = None
+        self._tomtube.reload()
+        d = report if isinstance(report, dict) else {}
+        QMessageBox.information(
+            self,
+            "TomTube ingest complete",
+            f"Enumerated: {d.get('enumerated', 0)}\n"
+            f"Newly added rows: {d.get('newly_added_rows', 0)}\n"
+            f"Processed OK: {d.get('processed', 0)}\n"
+            f"Failed: {d.get('failed', 0)}",
+        )
+        self._refresh_status()
+
+    def _on_video_failed(self, err: str) -> None:
+        self._progress_bar.setVisible(False)
+        self._video_worker = None
+        QMessageBox.critical(self, "TomTube ingest failed", err)
+        self._refresh_status()
+
     # ------------------------------------------------------------------
     # status bar
     # ------------------------------------------------------------------
@@ -914,7 +997,8 @@ class MainWindow(QMainWindow):
         # Close must mean close — a lingering QThread keeps the whole
         # Python process alive invisibly. Stop each worker cleanly, then
         # fall back to terminate() if it refuses to exit in time.
-        for worker in (self._worker, self._embed_worker, self._image_embed_worker):
+        for worker in (self._worker, self._embed_worker, self._image_embed_worker,
+                       self._video_worker):
             if worker is not None and worker.isRunning():
                 worker.quit()
                 worker.wait(1500)
