@@ -238,16 +238,18 @@ def upsert_video_rows(conn: sqlite3.Connection, entries: list[VideoEntry]) -> in
 # audio download
 # ---------------------------------------------------------------------------
 def _yt_common_opts(browser: str | None) -> dict:
-    """Options common to both enumerate + download calls."""
+    """Options common to both enumerate + download calls.
+
+    Note: callers that *download* must set ``ignoreerrors=False`` so that
+    yt-dlp actually raises on format/auth failures instead of silently
+    returning None — otherwise retry loops can't detect the failure.
+    """
     opts: dict = {
         "quiet": True,
         "no_warnings": True,
         "ignoreerrors": True,
         "ffmpeg_location": _ffmpeg_path(),
     }
-    # YouTube blocks anonymous downloads on many videos. Passing cookies
-    # from a logged-in browser session bypasses that without storing a
-    # cookie file manually.
     if browser:
         opts["cookiesfrombrowser"] = (browser.lower(),)
     return opts
@@ -297,21 +299,28 @@ def download_audio(
 
     log.info("Downloading audio for %s (cookies=%s)", video_id, browser or "none")
     last_exc: Exception | None = None
+    produced: Path | None = None
     for i, fmt in enumerate(format_chain):
         opts = _yt_common_opts(browser)
         opts.update({
             "format": fmt,
             "outtmpl": tmp_template,
+            # Must be False here: with ignoreerrors=True, yt-dlp swallows
+            # "Requested format is not available" and returns None, so our
+            # retry never triggers.
+            "ignoreerrors": False,
+            "no_warnings": False,
             "postprocessors": [{
                 "key": "FFmpegExtractAudio",
                 "preferredcodec": "mp3",
                 "preferredquality": str(bitrate_kbps),
             }],
         })
+        produced_this_round = False
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 ydl.extract_info(url, download=True)
-            break   # success
+            produced_this_round = True
         except Exception as exc:
             msg = str(exc)
             last_exc = exc
@@ -322,12 +331,31 @@ def download_audio(
                     f"youtube_browser_cookies setting to 'firefox', 'edge', or "
                     f"'brave' and retry."
                 ) from exc
-            if "Requested format is not available" in msg and i + 1 < len(format_chain):
-                log.info("format %r unavailable for %s — trying next in chain",
+            if "Requested format is not available" in msg:
+                if i + 1 < len(format_chain):
+                    log.info("format %r unavailable for %s — trying next in chain",
+                             fmt, video_id)
+                    continue
+                # last format failed too — fall through to error below
+                break
+            raise
+
+        # Belt-and-braces: even with ignoreerrors=False, some error paths
+        # in yt-dlp only print and return None. Detect a missing output file
+        # and progress down the chain.
+        if produced_this_round:
+            for cand in videos_dir().glob(f"{video_id}.*"):
+                if cand.is_file() and cand.stat().st_size > 1024:
+                    produced = cand
+                    break
+            if produced is not None:
+                break   # real success
+            if i + 1 < len(format_chain):
+                log.info("format %r produced no file for %s — trying next in chain",
                          fmt, video_id)
                 continue
-            raise
-    else:
+    if produced is None and last_exc is not None:
+        # Only raise if every format in the chain failed.
         raise RuntimeError(
             f"no format in chain worked for {video_id}: {last_exc}"
         )
