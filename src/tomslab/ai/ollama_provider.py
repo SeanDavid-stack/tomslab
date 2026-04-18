@@ -78,11 +78,31 @@ class OllamaProvider(AIProvider):
         return [list(v) for v in r.embeddings]
 
     # ---- chat ----------------------------------------------------------
-    def chat(self, messages: list[dict], system: str | None = None) -> str:
-        msgs = []
+    def chat(
+        self,
+        messages: list[dict],
+        system: str | None = None,
+        image_paths: list[str] | None = None,
+    ) -> str:
+        msgs: list[dict] = []
         if system:
             msgs.append({"role": "system", "content": system})
         msgs.extend(messages)
+        # Attach images to the final user turn if any. Note: the configured
+        # chat model may be text-only (e.g. llama3.1:8b). In that case
+        # Ollama will typically ignore the images — we log it so users
+        # know. If they want multimodal, they should point chat_model_ollama
+        # at llava or similar.
+        if image_paths and msgs:
+            for i in range(len(msgs) - 1, -1, -1):
+                if msgs[i].get("role") == "user":
+                    msgs[i] = {**msgs[i], "images": list(image_paths)}
+                    log.info(
+                        "Ollama chat: attached %d image(s) to final user turn "
+                        "(model=%s — will be ignored if non-multimodal)",
+                        len(image_paths), self._chat_model,
+                    )
+                    break
         try:
             r = self._client.chat(model=self._chat_model, messages=msgs)
         except Exception as exc:
