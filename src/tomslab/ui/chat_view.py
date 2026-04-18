@@ -2,16 +2,20 @@
 
 Shows a transcript with citation links that jump to the original
 message or PDF page.  Chat history is in-memory per session.
+Includes a "Did you mean?" interactive spell-correction banner and
+friendly error rendering for transient provider hiccups.
 """
 from __future__ import annotations
 
+import hashlib
 import html
 import re
 import sqlite3
 
 from PyQt6.QtCore import Qt, QUrl, pyqtSignal
-from PyQt6.QtGui import QFont, QKeyEvent, QTextCursor
+from PyQt6.QtGui import QKeyEvent, QTextCursor
 from PyQt6.QtWidgets import (
+    QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -21,6 +25,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from tomslab import chat as chatmod
 from tomslab.chat import AnswerResult, ChatTurn, CITATION_RE
 from tomslab.ui.chat_worker import ChatWorker
 
@@ -30,8 +35,36 @@ SAMPLE_PROMPTS = [
     "How does Tom approach the opening?",
     "What does Tom mean by 'absorption at VPOC'?",
     "What is the Initial Balance and why does it matter?",
-    "Show me Tom's view on overnight inventory imbalance",
+    "How does Tom handle overnight inventory imbalance?",
 ]
+
+
+# ---- palette (matches MessageDelegate) -------------------------------------
+COLOR_BG     = "#1E1F22"
+COLOR_BG_ALT = "#2B2D31"
+COLOR_TEXT   = "#DBDEE1"
+COLOR_DIM    = "#949BA4"
+COLOR_AUTHOR_YOU = "#6AA1FF"
+COLOR_AUTHOR_TOM = "#FFC857"
+COLOR_BORDER = "#3F4147"
+COLOR_PRIMARY = "#5865F2"
+
+
+# A small palette for user-avatar auto-coloring. Not used for Tom's Lab
+# (that always uses the gold accent).
+_AVATAR_COLORS = [
+    "#5865F2", "#E67E22", "#2ECC71", "#9B59B6", "#E91E63",
+    "#1ABC9C", "#F1C40F", "#E74C3C", "#3498DB", "#95A5A6",
+]
+
+
+def _avatar_for(name: str) -> tuple[str, str]:
+    """Deterministic (letter, hex-color) avatar for a given display name."""
+    n = (name or "?").strip()
+    letter = n[:1].upper() if n else "?"
+    h = int(hashlib.md5(n.lower().encode("utf-8")).hexdigest(), 16)
+    color = _AVATAR_COLORS[h % len(_AVATAR_COLORS)]
+    return letter, color
 
 
 class _InputBox(QTextEdit):
@@ -65,6 +98,7 @@ class ChatView(QWidget):
         self._history: list[ChatTurn] = []
         self._last_answer_sources: list = []
         self._worker: ChatWorker | None = None
+        self._pending_corrected: str | None = None    # used by the Did-you-mean banner
 
         self._build_ui()
         self._render_empty_state()
@@ -82,49 +116,84 @@ class ChatView(QWidget):
         self._transcript.setOpenLinks(False)
         self._transcript.anchorClicked.connect(self._on_anchor_clicked)
         self._transcript.setStyleSheet(
-            "QTextBrowser { background: #1E1F22; color: #DBDEE1; border: none; "
-            " padding: 12px; font-size: 13px; }"
+            f"QTextBrowser {{ background: {COLOR_BG}; color: {COLOR_TEXT};"
+            f" border: none; padding: 16px 24px; font-size: 13px;"
+            f" selection-background-color: {COLOR_PRIMARY}; }}"
         )
         outer.addWidget(self._transcript, stretch=1)
 
+        # Did-you-mean banner (hidden until a correction is available)
+        self._banner = QFrame()
+        self._banner.setStyleSheet(
+            f"QFrame {{ background: #3A3320; border-left: 3px solid {COLOR_AUTHOR_TOM};"
+            f" border-radius: 6px; padding: 8px 12px; margin: 0 12px; }}"
+            f"QLabel {{ color: {COLOR_TEXT}; }}"
+            f"QPushButton {{ background: {COLOR_AUTHOR_TOM}; color: #1E1F22;"
+            f" padding: 5px 12px; border: none; border-radius: 4px; font-weight: 600; }}"
+            f"QPushButton:hover {{ background: #FFD87A; }}"
+            f"QPushButton#secondary {{ background: transparent;"
+            f" color: {COLOR_DIM}; border: 1px solid {COLOR_BORDER}; }}"
+            f"QPushButton#secondary:hover {{ color: {COLOR_TEXT}; }}"
+        )
+        bh = QHBoxLayout(self._banner)
+        bh.setContentsMargins(10, 6, 10, 6)
+        bh.setSpacing(10)
+        self._banner_label = QLabel("")
+        self._banner_label.setWordWrap(True)
+        self._banner_use_btn = QPushButton("Use correction")
+        self._banner_use_btn.clicked.connect(self._on_banner_use)
+        self._banner_keep_btn = QPushButton("Send as typed")
+        self._banner_keep_btn.setObjectName("secondary")
+        self._banner_keep_btn.clicked.connect(self._on_banner_keep)
+        bh.addWidget(self._banner_label, stretch=1)
+        bh.addWidget(self._banner_use_btn)
+        bh.addWidget(self._banner_keep_btn)
+        self._banner.setVisible(False)
+        outer.addWidget(self._banner)
+
         self._status = QLabel("")
-        self._status.setStyleSheet("color: #949BA4; padding-left: 12px;")
+        self._status.setStyleSheet(f"color: {COLOR_DIM}; padding-left: 24px;")
         outer.addWidget(self._status)
 
         # --- input row ------------------------------------------------
         input_row = QHBoxLayout()
-        input_row.setContentsMargins(8, 0, 8, 8)
+        input_row.setContentsMargins(12, 0, 12, 10)
+        input_row.setSpacing(10)
 
         self._input = _InputBox()
         self._input.setPlaceholderText(
             "Ask Tom anything about his framework — Ctrl+Enter to send"
         )
-        self._input.setFixedHeight(80)
+        self._input.setFixedHeight(82)
         self._input.setStyleSheet(
-            "QTextEdit { background: #2B2D31; color: #DBDEE1;"
-            " border: 1px solid #3F4147; border-radius: 8px; padding: 6px 10px; }"
-            "QTextEdit:focus { border: 1px solid #5865F2; }"
+            f"QTextEdit {{ background: {COLOR_BG_ALT}; color: {COLOR_TEXT};"
+            f" border: 1px solid {COLOR_BORDER}; border-radius: 10px;"
+            f" padding: 10px 14px; font-size: 14px; }}"
+            f"QTextEdit:focus {{ border: 1px solid {COLOR_PRIMARY}; }}"
         )
         self._input.submit.connect(self._on_send)
         input_row.addWidget(self._input, stretch=1)
 
         button_col = QVBoxLayout()
+        button_col.setSpacing(6)
         self._send_btn = QPushButton("Ask")
         self._send_btn.clicked.connect(self._on_send)
         self._send_btn.setStyleSheet(
-            "QPushButton { background: #5865F2; color: white; padding: 8px 18px;"
-            " border: none; border-radius: 6px; font-weight: 600; }"
-            "QPushButton:disabled { background: #3F4147; color: #949BA4; }"
-            "QPushButton:hover:!disabled { background: #4752C4; }"
+            f"QPushButton {{ background: {COLOR_PRIMARY}; color: white;"
+            f" padding: 10px 22px; border: none; border-radius: 8px;"
+            f" font-weight: 600; font-size: 13px; }}"
+            f"QPushButton:disabled {{ background: {COLOR_BORDER}; color: {COLOR_DIM}; }}"
+            f"QPushButton:hover:!disabled {{ background: #4752C4; }}"
         )
         button_col.addWidget(self._send_btn)
 
         self._clear_btn = QPushButton("Clear")
         self._clear_btn.clicked.connect(self.clear_history)
         self._clear_btn.setStyleSheet(
-            "QPushButton { background: transparent; color: #949BA4; padding: 6px 14px;"
-            " border: 1px solid #3F4147; border-radius: 6px; }"
-            "QPushButton:hover { color: #DBDEE1; }"
+            f"QPushButton {{ background: transparent; color: {COLOR_DIM};"
+            f" padding: 7px 16px; border: 1px solid {COLOR_BORDER};"
+            f" border-radius: 8px; }}"
+            f"QPushButton:hover {{ color: {COLOR_TEXT}; }}"
         )
         button_col.addWidget(self._clear_btn)
         button_col.addStretch(1)
@@ -137,19 +206,24 @@ class ChatView(QWidget):
     # ------------------------------------------------------------------
     def _render_empty_state(self) -> None:
         prompts = "".join(
-            f'<li><a href="sample:{html.escape(p)}" style="color: #6AA1FF; '
-            f'text-decoration:none;">{html.escape(p)}</a></li>'
+            f'<li style="margin: 6px 0;"><a href="sample:{html.escape(p)}" '
+            f'style="color: {COLOR_AUTHOR_YOU}; text-decoration:none;">'
+            f'{html.escape(p)}</a></li>'
             for p in SAMPLE_PROMPTS
         )
         body = (
-            f'<div style="max-width: 720px; margin: 40px auto; color: #949BA4;">'
-            f'<h2 style="color: #DBDEE1; font-weight: 600;">Ask Tom</h2>'
+            f'<div style="max-width: 720px; margin: 40px auto; color: {COLOR_DIM};">'
+            f'<div style="display:inline-block; background:{COLOR_AUTHOR_TOM};'
+            f' color:#1E1F22; width:48px; height:48px; border-radius:24px;'
+            f' text-align:center; line-height:48px; font-weight:700;'
+            f' font-size: 22px; margin-bottom: 14px;">T</div>'
+            f'<h2 style="color: {COLOR_TEXT}; font-weight: 600; margin: 0 0 8px 0;">Ask Tom</h2>'
             f'<p>Type a question and I\'ll retrieve the best matches from '
             f'Tom\'s Discord posts, his authored PDFs, and the reference books. '
             f'Answers come with <code>[msg:ID]</code> and <code>[doc:ID]</code> '
             f'citations you can click to jump to the source.</p>'
-            f'<p style="color: #DBDEE1; margin-top: 18px;">Try one of these:</p>'
-            f'<ul>{prompts}</ul>'
+            f'<p style="color: {COLOR_TEXT}; margin-top: 22px; font-weight: 600;">Try one:</p>'
+            f'<ul style="padding-left: 18px;">{prompts}</ul>'
             f'</div>'
         )
         self._transcript.setHtml(body)
@@ -167,23 +241,38 @@ class ChatView(QWidget):
         cur.movePosition(QTextCursor.MoveOperation.End)
         self._transcript.setTextCursor(cur)
 
+    @staticmethod
+    def _avatar_html(letter: str, color: str) -> str:
+        return (
+            f'<span style="display:inline-block; background:{color}; color:white;'
+            f' width:28px; height:28px; border-radius:14px; text-align:center;'
+            f' line-height:28px; font-weight:700; font-size:13px;'
+            f' margin-right:10px;">{html.escape(letter)}</span>'
+        )
+
     def _render_user(self, text: str) -> str:
         safe = html.escape(text).replace("\n", "<br>")
+        avatar = self._avatar_html("Y", COLOR_AUTHOR_YOU)
         return (
-            '<div style="margin: 16px 0 8px 0;">'
-            '<div style="color: #6AA1FF; font-weight: 600; margin-bottom: 4px;">You</div>'
-            f'<div style="color: #DBDEE1;">{safe}</div>'
+            '<div style="margin: 18px 0 10px 0;">'
+            f'<div style="margin-bottom: 6px;">{avatar}'
+            f'<span style="color: {COLOR_AUTHOR_YOU}; font-weight: 600;">You</span></div>'
+            f'<div style="color: {COLOR_TEXT}; margin-left: 38px;">{safe}</div>'
             '</div>'
         )
 
     def _render_assistant(self, text: str) -> str:
         body = self._linkify_citations(text)
+        avatar = self._avatar_html("T", COLOR_AUTHOR_TOM)
         return (
-            '<div style="margin: 16px 0 8px 0; padding: 10px 14px;'
-            ' background: #2B2D31; border-left: 3px solid #FFC857;'
-            ' border-radius: 6px;">'
-            '<div style="color: #FFC857; font-weight: 600; margin-bottom: 4px;">Tom\'s Lab</div>'
-            f'<div style="color: #DBDEE1; white-space: pre-wrap;">{body}</div>'
+            '<div style="margin: 18px 0 10px 0;">'
+            f'<div style="margin-bottom: 6px;">{avatar}'
+            f'<span style="color: {COLOR_AUTHOR_TOM}; font-weight: 600;">'
+            f'Tom\'s Lab</span></div>'
+            f'<div style="margin-left: 38px; padding: 12px 16px;'
+            f' background: {COLOR_BG_ALT}; border-left: 3px solid {COLOR_AUTHOR_TOM};'
+            f' border-radius: 8px; color: {COLOR_TEXT}; white-space: pre-wrap;'
+            f' line-height: 1.55;">{body}</div>'
             '</div>'
         )
 
@@ -201,8 +290,9 @@ class ChatView(QWidget):
             href = f"{kind}:{raw}"
             out.append(
                 f'<a href="{html.escape(href)}" '
-                f'style="color: #FFC857; text-decoration: none; '
-                f'background: rgba(255,200,87,0.1); padding: 1px 4px; border-radius: 3px;">{label}</a>'
+                f'style="color: {COLOR_AUTHOR_TOM}; text-decoration: none; '
+                f'background: rgba(255,200,87,0.12); padding: 1px 5px;'
+                f' border-radius: 3px; font-weight: 500;">{label}</a>'
             )
             last_end = end
         if last_end < len(text):
@@ -210,7 +300,38 @@ class ChatView(QWidget):
         return "".join(out)
 
     # ------------------------------------------------------------------
-    # actions
+    # Did-you-mean banner
+    # ------------------------------------------------------------------
+    def _show_correction_banner(self, original: str, corrected: str,
+                                corrections: list[tuple[str, str]]) -> None:
+        pairs = ", ".join(f"<b>{html.escape(o)}</b>→<b>{html.escape(c)}</b>"
+                          for o, c in corrections)
+        self._banner_label.setText(
+            f"Did you mean: <i>{html.escape(corrected)}</i>? ({pairs})"
+        )
+        self._pending_corrected = corrected
+        self._banner.setVisible(True)
+
+    def _hide_correction_banner(self) -> None:
+        self._banner.setVisible(False)
+        self._pending_corrected = None
+        self._banner_label.setText("")
+
+    def _on_banner_use(self) -> None:
+        q = self._pending_corrected
+        self._hide_correction_banner()
+        if q:
+            self._input.setPlainText(q)
+            self._submit_now(q)
+
+    def _on_banner_keep(self) -> None:
+        q = self._input.toPlainText().strip()
+        self._hide_correction_banner()
+        if q:
+            self._submit_now(q)
+
+    # ------------------------------------------------------------------
+    # send flow
     # ------------------------------------------------------------------
     def _on_send(self) -> None:
         q = self._input.toPlainText().strip()
@@ -218,14 +339,24 @@ class ChatView(QWidget):
             return
         if self._worker is not None and self._worker.isRunning():
             return
+
+        # Check for a spell suggestion first — don't swallow typos silently.
+        corrected_q, corrections = chatmod.preview_corrections(q)
+        if corrections and corrected_q != q:
+            self._show_correction_banner(q, corrected_q, corrections)
+            return
+
+        self._submit_now(q)
+
+    def _submit_now(self, question: str) -> None:
         self._input.clear()
 
-        self._history.append(ChatTurn(role="user", content=q))
+        self._history.append(ChatTurn(role="user", content=question))
         self._render_transcript()
         self._set_busy(True)
         self._status.setText("Thinking…")
 
-        self._worker = ChatWorker(q, self._history[:-1], self)
+        self._worker = ChatWorker(question, self._history[:-1], self)
         self._worker.answered.connect(self._on_answered)
         self._worker.failed.connect(self._on_failed)
         self._worker.start()
@@ -244,10 +375,8 @@ class ChatView(QWidget):
 
     def _on_failed(self, err: str) -> None:
         self._worker = None
-        self._history.append(ChatTurn(
-            role="assistant",
-            content=f"Error: {err}",
-        ))
+        friendly = _friendly_error(err)
+        self._history.append(ChatTurn(role="assistant", content=friendly))
         self._render_transcript()
         self._set_busy(False)
         self._status.setText("Ready · Ctrl+Enter to send")
@@ -259,11 +388,11 @@ class ChatView(QWidget):
 
     def clear_history(self) -> None:
         self._history = []
+        self._hide_correction_banner()
         self._render_empty_state()
         self._status.setText("")
 
     def shutdown(self) -> None:
-        """Best-effort stop of the chat worker on window close."""
         if self._worker is not None and self._worker.isRunning():
             self._worker.quit()
             self._worker.wait(1500)
@@ -273,7 +402,7 @@ class ChatView(QWidget):
             self._worker = None
 
     # ------------------------------------------------------------------
-    # citation clicks
+    # citation / sample clicks
     # ------------------------------------------------------------------
     def _on_anchor_clicked(self, url: QUrl) -> None:
         href = url.toString()
@@ -285,3 +414,33 @@ class ChatView(QWidget):
         if not m:
             return
         self.citation_clicked.emit(m.group(1), m.group(2))
+
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+def _friendly_error(err: str) -> str:
+    """Transform a raw exception string into something a PM wants to see."""
+    low = (err or "").lower()
+    if "503" in err or "unavailable" in low:
+        return (
+            "**Gemini is overloaded right now.** Google's free tier sometimes "
+            "returns this during spikes. Give it 10–30 seconds and try again — "
+            "your question will retrieve the same context on retry."
+        )
+    if "429" in err or "resource_exhausted" in low:
+        return (
+            "**Gemini free-tier rate limit reached.** Wait a minute and "
+            "retry, or add billing at console.cloud.google.com for higher limits."
+        )
+    if "no Gemini API key" in err or "api key" in low:
+        return (
+            "**No Gemini API key configured.** Open File → Settings → AI "
+            "Providers and paste a key from https://aistudio.google.com/app/apikey."
+        )
+    if "ollama" in low:
+        return (
+            "**Ollama is unreachable.** Make sure the Ollama app is running, "
+            "then try again."
+        )
+    return f"Error: {err}"

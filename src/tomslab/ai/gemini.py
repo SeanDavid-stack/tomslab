@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import time
 
-from tomslab.ai.base import AIProvider, ProviderError, ProviderUnavailable
+from tomslab.ai.base import AIProvider, ProviderError, ProviderUnavailable  # noqa: F401
 
 log = logging.getLogger(__name__)
 
@@ -104,12 +104,38 @@ class GeminiProvider(AIProvider):
         config = None
         if system:
             config = genai_types.GenerateContentConfig(system_instruction=system)
-        try:
-            r = self._client.models.generate_content(
-                model=self._chat_model,
-                contents=contents,
-                config=config,
-            )
-        except Exception as exc:
-            raise ProviderError(f"gemini chat failed: {exc}") from exc
-        return (r.text or "").strip()
+
+        # Auto-retry on transient 503 / 429. Google's free tier intermittently
+        # returns UNAVAILABLE under load; most calls succeed on the next try.
+        last_exc: Exception | None = None
+        delays = [1.5, 4.0, 10.0]
+        for attempt, delay in enumerate([0.0] + delays):
+            if delay:
+                time.sleep(delay)
+            try:
+                r = self._client.models.generate_content(
+                    model=self._chat_model,
+                    contents=contents,
+                    config=config,
+                )
+                return (r.text or "").strip()
+            except Exception as exc:
+                msg = str(exc)
+                last_exc = exc
+                is_transient = (
+                    "503" in msg or "UNAVAILABLE" in msg or "429" in msg
+                    or "RESOURCE_EXHAUSTED" in msg or "INTERNAL" in msg
+                )
+                if not is_transient:
+                    raise ProviderError(f"gemini chat failed: {msg[:300]}") from exc
+                log.warning(
+                    "Gemini transient error (attempt %d): %s",
+                    attempt + 1, msg[:200],
+                )
+
+        # all retries exhausted
+        # Surface a friendly, short message — the UI renders this verbatim.
+        raise ProviderError(
+            "Gemini is currently overloaded (HTTP 503). "
+            "This is usually brief — please try again in a moment."
+        )
