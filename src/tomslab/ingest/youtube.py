@@ -292,72 +292,83 @@ def download_audio(
     # progressively looser. The FFmpeg postprocessor strips video and
     # outputs MP3 regardless of input format.
     format_chain = [
-        "bestaudio/best",           # ideal: audio-only stream
+        "bestaudio/best",
         "bestaudio[ext=m4a]/bestaudio[ext=webm]/best",
-        "best",                      # fallback: combined, extract audio
+        "best",
+    ]
+
+    # YouTube's "n challenge" (obfuscated signature) defeats the default
+    # web client when the JS solver can't run. Falling back to alternate
+    # player clients bypasses the challenge entirely on most videos.
+    client_chain = [
+        None,                      # default (web)
+        ("android",),
+        ("ios",),
+        ("tv_embedded", "web_embedded"),
+        ("mweb",),
     ]
 
     log.info("Downloading audio for %s (cookies=%s)", video_id, browser or "none")
     last_exc: Exception | None = None
     produced: Path | None = None
-    for i, fmt in enumerate(format_chain):
-        opts = _yt_common_opts(browser)
-        opts.update({
-            "format": fmt,
-            "outtmpl": tmp_template,
-            # Must be False here: with ignoreerrors=True, yt-dlp swallows
-            # "Requested format is not available" and returns None, so our
-            # retry never triggers.
-            "ignoreerrors": False,
-            "no_warnings": False,
-            "postprocessors": [{
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": str(bitrate_kbps),
-            }],
-        })
-        produced_this_round = False
-        try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                ydl.extract_info(url, download=True)
-            produced_this_round = True
-        except Exception as exc:
-            msg = str(exc)
-            last_exc = exc
-            if "DPAPI" in msg or "Failed to decrypt" in msg or "failed to load cookies" in msg:
-                raise CookieDecryptError(
-                    f"Can't read {browser or 'browser'} cookies. Chrome 127+ uses "
-                    f"App-Bound Encryption which yt-dlp can't unwrap. Set the "
-                    f"youtube_browser_cookies setting to 'firefox', 'edge', or "
-                    f"'brave' and retry."
-                ) from exc
-            if "Requested format is not available" in msg:
-                if i + 1 < len(format_chain):
-                    log.info("format %r unavailable for %s — trying next in chain",
-                             fmt, video_id)
-                    continue
-                # last format failed too — fall through to error below
-                break
-            raise
+    for clients in client_chain:
+        if produced is not None:
+            break
+        for i, fmt in enumerate(format_chain):
+            opts = _yt_common_opts(browser)
+            opts.update({
+                "format": fmt,
+                "outtmpl": tmp_template,
+                "ignoreerrors": False,
+                "no_warnings": False,
+                "postprocessors": [{
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": "mp3",
+                    "preferredquality": str(bitrate_kbps),
+                }],
+            })
+            if clients is not None:
+                opts["extractor_args"] = {
+                    "youtube": {"player_client": list(clients)}
+                }
+            try:
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    ydl.extract_info(url, download=True)
+            except Exception as exc:
+                msg = str(exc)
+                last_exc = exc
+                if "DPAPI" in msg or "Failed to decrypt" in msg or "failed to load cookies" in msg:
+                    raise CookieDecryptError(
+                        f"Can't read {browser or 'browser'} cookies. Chrome 127+ uses "
+                        f"App-Bound Encryption which yt-dlp can't unwrap. Set the "
+                        f"youtube_browser_cookies setting to 'firefox', 'edge', or "
+                        f"'brave' and retry."
+                    ) from exc
+                if "Requested format is not available" in msg:
+                    if i + 1 < len(format_chain):
+                        continue
+                    break   # try next client
+                raise
 
-        # Belt-and-braces: even with ignoreerrors=False, some error paths
-        # in yt-dlp only print and return None. Detect a missing output file
-        # and progress down the chain.
-        if produced_this_round:
+            # Check for a real output file (yt-dlp may have swallowed errors
+            # and returned None instead of raising).
             for cand in videos_dir().glob(f"{video_id}.*"):
                 if cand.is_file() and cand.stat().st_size > 1024:
                     produced = cand
                     break
             if produced is not None:
-                break   # real success
+                break
             if i + 1 < len(format_chain):
-                log.info("format %r produced no file for %s — trying next in chain",
-                         fmt, video_id)
                 continue
+        if produced is None:
+            log.info(
+                "player_client %s produced no file for %s — trying next client",
+                clients or "web", video_id,
+            )
     if produced is None and last_exc is not None:
-        # Only raise if every format in the chain failed.
         raise RuntimeError(
-            f"no format in chain worked for {video_id}: {last_exc}"
+            f"no format/client combination worked for {video_id}: {last_exc}. "
+            f"YouTube's bot-gate may have tightened — try `pip install -U yt-dlp`."
         )
     if not out.exists():
         for cand in videos_dir().glob(f"{video_id}.*"):
