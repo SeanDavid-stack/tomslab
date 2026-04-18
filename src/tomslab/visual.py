@@ -186,9 +186,18 @@ class VisualHit:
     local_path: str
     filename: str
     score: float
+    source_type: str = "attachment"   # 'attachment' | 'doc_page'
+    doc_page_id: int | None = None
+    doc_title: str = ""
+    doc_page_num: int = 0
 
 
 class _VisualCache:
+    """Cached CLIP matrix covering both chart attachments AND PDF page images.
+
+    Each row's metadata carries source_type so search results carry whichever
+    origin they came from.
+    """
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.signature: tuple | None = None
@@ -197,6 +206,11 @@ class _VisualCache:
         self.message_ids: list[str] | None = None
         self.local_paths: list[str] | None = None
         self.filenames: list[str] | None = None
+        # parallel arrays for doc-page pathway
+        self.source_types: list[str] | None = None
+        self.doc_page_ids: list[int] | None = None
+        self.doc_titles: list[str] | None = None
+        self.doc_page_nums: list[int] | None = None
 
 
 _cache = _VisualCache()
@@ -210,36 +224,66 @@ def invalidate_cache() -> None:
         _cache.message_ids = None
         _cache.local_paths = None
         _cache.filenames = None
+        _cache.source_types = None
+        _cache.doc_page_ids = None
+        _cache.doc_titles = None
+        _cache.doc_page_nums = None
 
 
 def _current_signature(conn: sqlite3.Connection) -> tuple:
-    row = conn.execute(
+    r_att = conn.execute(
         "SELECT COUNT(*) AS n, MAX(generated_at) AS t FROM image_embeddings"
     ).fetchone()
-    return (int(row["n"] or 0), row["t"] or "")
+    r_doc = conn.execute(
+        "SELECT COUNT(*) AS n, MAX(generated_at) AS t FROM doc_page_image_embeddings"
+    ).fetchone()
+    return (
+        int(r_att["n"] or 0),
+        r_att["t"] or "",
+        int(r_doc["n"] or 0),
+        r_doc["t"] or "",
+    )
 
 
 def available(conn: sqlite3.Connection) -> bool:
-    return _current_signature(conn)[0] > 0
+    sig = _current_signature(conn)
+    return sig[0] > 0 or sig[2] > 0
 
 
 def _load_matrix(conn: sqlite3.Connection) -> bool:
     sig = _current_signature(conn)
     if _cache.signature == sig and _cache.matrix is not None:
         return True
-    if sig[0] == 0:
+    if sig[0] == 0 and sig[2] == 0:
         _cache.signature = sig
         _cache.matrix = None
         return False
 
-    rows = conn.execute(
+    att_rows = conn.execute(
         """
-        SELECT ie.attachment_id AS aid, ie.dim AS dim, ie.embedding AS blob,
-               a.message_id AS mid, a.local_path AS path, a.filename AS fn
+        SELECT ie.dim AS dim, ie.embedding AS blob,
+               'attachment' AS src,
+               a.id AS aid, a.message_id AS mid, a.local_path AS path, a.filename AS fn,
+               NULL AS pid, NULL AS title, NULL AS pnum
           FROM image_embeddings ie
           JOIN attachments a ON a.id = ie.attachment_id
         """
     ).fetchall()
+
+    doc_rows = conn.execute(
+        """
+        SELECT de.dim AS dim, de.embedding AS blob,
+               'doc_page' AS src,
+               NULL AS aid, NULL AS mid, p.rendered_path AS path,
+               ('page_' || printf('%04d', p.page_num) || '.png') AS fn,
+               p.id AS pid, d.title AS title, p.page_num AS pnum
+          FROM doc_page_image_embeddings de
+          JOIN document_pages p ON p.id = de.page_id
+          JOIN documents d ON d.id = p.document_id
+        """
+    ).fetchall()
+
+    rows = list(att_rows) + list(doc_rows)
     if not rows:
         _cache.signature = sig
         _cache.matrix = None
@@ -252,17 +296,24 @@ def _load_matrix(conn: sqlite3.Connection) -> bool:
     mids = [""] * n
     paths = [""] * n
     fns = [""] * n
+    srcs = [""] * n
+    pids = [0] * n
+    titles = [""] * n
+    pnums = [0] * n
     for i, r in enumerate(rows):
         v = np.frombuffer(r["blob"], dtype=np.float32)
         if v.size != dim:
             v = v[:dim] if v.size > dim else np.pad(v, (0, dim - v.size))
         mat[i] = v
+        srcs[i] = r["src"] or ""
         aids[i] = r["aid"] or ""
         mids[i] = r["mid"] or ""
         paths[i] = r["path"] or ""
         fns[i] = r["fn"] or ""
+        pids[i] = int(r["pid"]) if r["pid"] is not None else 0
+        titles[i] = r["title"] or ""
+        pnums[i] = int(r["pnum"]) if r["pnum"] is not None else 0
 
-    # embeddings are already L2-normalised at insert time, but re-normalise defensively
     norms = np.linalg.norm(mat, axis=1, keepdims=True)
     norms[norms == 0] = 1.0
     mat /= norms
@@ -273,6 +324,10 @@ def _load_matrix(conn: sqlite3.Connection) -> bool:
     _cache.message_ids = mids
     _cache.local_paths = paths
     _cache.filenames = fns
+    _cache.source_types = srcs
+    _cache.doc_page_ids = pids
+    _cache.doc_titles = titles
+    _cache.doc_page_nums = pnums
     return True
 
 
@@ -303,29 +358,50 @@ def visual_search(
     top_idx = np.argpartition(-scores, k - 1)[:k]
     top_idx = top_idx[np.argsort(-scores[top_idx])]
 
-    return [
-        VisualHit(
-            attachment_id=aids[int(i)],
-            message_id=mids[int(i)],
-            local_path=paths[int(i)],
-            filename=fns[int(i)],
-            score=float(scores[int(i)]),
+    hits: list[VisualHit] = []
+    srcs = _cache.source_types or []
+    pids = _cache.doc_page_ids or []
+    titles = _cache.doc_titles or []
+    pnums = _cache.doc_page_nums or []
+    for i in top_idx:
+        idx = int(i)
+        src = srcs[idx] if idx < len(srcs) else "attachment"
+        hits.append(
+            VisualHit(
+                attachment_id=aids[idx],
+                message_id=mids[idx],
+                local_path=paths[idx],
+                filename=fns[idx],
+                score=float(scores[idx]),
+                source_type=src,
+                doc_page_id=pids[idx] if idx < len(pids) and pids[idx] else None,
+                doc_title=titles[idx] if idx < len(titles) else "",
+                doc_page_num=pnums[idx] if idx < len(pnums) else 0,
+            )
         )
-        for i in top_idx
-    ]
+    return hits
 
 
 def visual_search_message_ids(
     conn: sqlite3.Connection, query: str, limit: int = 120
 ) -> list[str]:
-    """Dedup-by-message version of visual_search, for the main feed's Visual mode."""
+    """Return typed ids for the main feed's Visual mode. Emits either
+    'msg:<discord_id>' for attachment hits or 'doc:<page_id>' for PDF
+    page hits — matching the schema used by the mixed semantic search.
+    """
     seen: set[str] = set()
     out: list[str] = []
     for h in visual_search(conn, query, limit=limit * 2):
-        if not h.message_id or h.message_id in seen:
+        if h.source_type == "doc_page" and h.doc_page_id:
+            tid = f"doc:{h.doc_page_id}"
+        elif h.message_id:
+            tid = f"msg:{h.message_id}"
+        else:
             continue
-        seen.add(h.message_id)
-        out.append(h.message_id)
+        if tid in seen:
+            continue
+        seen.add(tid)
+        out.append(tid)
         if len(out) >= limit:
             break
     return out
@@ -346,6 +422,22 @@ def pending_count(conn: sqlite3.Connection, model_tag: str) -> int:
            AND NOT EXISTS (
                 SELECT 1 FROM image_embeddings ie
                  WHERE ie.attachment_id = a.id AND ie.model = ?
+           )
+        """,
+        (model_tag,),
+    ).fetchone()
+    return int(row["n"] or 0)
+
+
+def pending_doc_page_count(conn: sqlite3.Connection, model_tag: str) -> int:
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS n
+          FROM document_pages p
+         WHERE p.rendered_path IS NOT NULL AND p.rendered_path != ''
+           AND NOT EXISTS (
+                SELECT 1 FROM doc_page_image_embeddings de
+                 WHERE de.page_id = p.id AND de.model = ?
            )
         """,
         (model_tag,),

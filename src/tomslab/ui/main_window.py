@@ -41,6 +41,7 @@ from tomslab import embed_service, image_embed_service, semantic, visual
 from tomslab.ingest.importer import ImportResult
 from tomslab.paths import database_path
 from tomslab.search import SearchMode
+from tomslab.ui.chat_view import ChatView
 from tomslab.ui.embed_worker import EmbedWorker
 from tomslab.ui.gallery_view import GalleryView
 from tomslab.ui.image_embed_worker import ImageEmbedWorker
@@ -201,6 +202,10 @@ class MainWindow(QMainWindow):
         self._gallery = GalleryView(self._conn, self)
         self._gallery.message_activated.connect(self._jump_to_message)
 
+        # --- ask tab ----------------------------------------------------
+        self._chat = ChatView(self._conn, self)
+        self._chat.citation_clicked.connect(self._on_citation)
+
         self._tabs = QTabWidget()
         self._tabs.setStyleSheet(
             "QTabWidget::pane { border: 0; }"
@@ -209,6 +214,7 @@ class MainWindow(QMainWindow):
         )
         self._tabs.addTab(self._list, "Feed")
         self._tabs.addTab(self._gallery, "Gallery")
+        self._tabs.addTab(self._chat, "Ask Tom")
         self._tabs.currentChanged.connect(self._on_tab_changed)
         outer.addWidget(self._tabs, stretch=1)
 
@@ -300,6 +306,39 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # gallery → feed jump
     # ------------------------------------------------------------------
+    def _on_citation(self, kind: str, raw_id: str) -> None:
+        """Ask-Tom citation click → jump to source."""
+        if kind == "msg":
+            self._jump_to_message(raw_id)
+        elif kind == "doc":
+            # doc:<page_id> — look up the page and show its content / rendered PNG
+            try:
+                page_id = int(raw_id)
+            except ValueError:
+                return
+            row = self._conn.execute(
+                """
+                SELECT p.page_num, p.rendered_path,
+                       COALESCE(NULLIF(p.ocr_text,''), p.extracted_text) AS text,
+                       d.title, d.filename
+                  FROM document_pages p JOIN documents d ON d.id = p.document_id
+                 WHERE p.id = ?
+                """,
+                (page_id,),
+            ).fetchone()
+            if not row:
+                QMessageBox.information(self, "Not found", "Couldn't locate that page.")
+                return
+            title = row["title"] or row["filename"] or "Document"
+            snippet = (row["text"] or "").strip()
+            if len(snippet) > 2000:
+                snippet = snippet[:1997] + "…"
+            QMessageBox.information(
+                self,
+                f"{title} · page {row['page_num']}",
+                snippet or "(no text on this page)",
+            )
+
     def _jump_to_message(self, message_id: str) -> None:
         # Clear search & switch to Feed, then try to scroll to the message.
         self._search.blockSignals(True)

@@ -10,6 +10,27 @@ See [`toms_lab_prd.md`](toms_lab_prd.md) for the full product spec.
 
 ## Status
 
+**Phase 5 — Ask Tom conversational RAG** ✅
+- New "Ask Tom" tab with a chat interface. Each turn pulls the top
+  K Discord windows **and** the top K PDF pages independently (per-doc
+  cap so one long PDF can't monopolise), assembles them into a
+  grounded prompt, and calls Gemini 2.5 Flash.
+- Tom-authored PDFs get a strong score boost so definitional queries
+  surface the authored source before Discord chatter or third-party
+  books.
+- Answers render as styled cards with clickable `[msg:...]` and
+  `[doc:...]` citations. Clicking a message citation jumps to it in
+  the Feed; clicking a doc citation pops up the PDF page content.
+- Multi-turn — history is kept per session and prepended to each call.
+
+**Phase 4.6 — Concept extraction + doc-page CLIP** ✅
+- Parses Tom's Glossary PDF with Gemini and seeds the `concepts` table
+  with the 26 definitions Tom uses (RTH, VPOC, VA, HVN/LVN, VWAP,
+  Naked VPOC, IB, Mean Reversion, ...). Idempotent INSERT OR IGNORE.
+- CLIP-embeds every rendered PDF page alongside chart attachments so
+  Visual mode / Gallery also find Tom's diagrams, not just Discord
+  screenshots.
+
 **Phase 4.5 — Reference PDF ingest** ✅
 - Drops Tom's authored PDFs (glossary, 60 Structured Trades, Market Structure,
   Opening Context Alignment, Bookmap Settings, ...) and third-party references
@@ -111,10 +132,12 @@ Toms Lab/
 │   ├── paths.py          # %APPDATA%/TomsLab layout
 │   ├── db.py             # SQLite schema + connection
 │   ├── search.py         # FTS5 query builder
-│   ├── semantic.py       # Text cosine search (numpy)
+│   ├── semantic.py       # Text cosine search (numpy) — messages + doc pages
 │   ├── visual.py         # CLIP joint image/text embeddings + search
-│   ├── embed_service.py  # Text embedding pipeline (Discord windows + doc pages)
-│   ├── image_embed_service.py  # CLIP image embedding pipeline
+│   ├── chat.py           # Ask Tom retrieval + prompt + Gemini call
+│   ├── concepts.py       # Glossary-PDF → concepts table seeder
+│   ├── embed_service.py  # Text embedding pipeline (windows + doc pages)
+│   ├── image_embed_service.py  # CLIP pipeline (charts + doc pages)
 │   ├── secret_store.py   # XOR-masked API key storage
 │   ├── docs/
 │   │   ├── pdf_render.py # pypdfium2 → PNG
@@ -134,6 +157,8 @@ Toms Lab/
 │       ├── message_model.py
 │       ├── message_delegate.py   # Discord-style message cards
 │       ├── gallery_view.py       # CLIP-backed chart grid
+│       ├── chat_view.py          # Ask Tom chat UI
+│       ├── chat_worker.py
 │       ├── settings_dialog.py    # AI Providers settings
 │       ├── import_worker.py
 │       ├── embed_worker.py

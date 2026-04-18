@@ -210,6 +210,19 @@ def docs_available(conn: sqlite3.Connection) -> bool:
     return _current_doc_signature(conn)[0] > 0
 
 
+_TOM_BOOST = 0.18        # tom_b-authored PDFs jump to the front for definitional queries
+_THIRD_PARTY_BOOST = 0.0  # third-party books ride at native cosine (no artificial lift)
+_UNKNOWN_DOC_BOOST = 0.02
+
+
+def _doc_author_boost(author: str) -> float:
+    if author == "tom_b":
+        return _TOM_BOOST
+    if author == "third_party":
+        return _THIRD_PARTY_BOOST
+    return _UNKNOWN_DOC_BOOST
+
+
 def _load_doc_matrix(conn: sqlite3.Connection) -> bool:
     sig = _current_doc_signature(conn)
     if _doc_cache.signature == sig and _doc_cache.matrix is not None:
@@ -265,12 +278,14 @@ def _load_doc_matrix(conn: sqlite3.Connection) -> bool:
 
 
 def mixed_semantic_search(
-    conn: sqlite3.Connection, query: str, limit: int = 200, doc_boost: float = 0.05
+    conn: sqlite3.Connection, query: str, limit: int = 200, doc_boost: float | None = None
 ) -> list[MixedSemanticHit]:
-    """Search Discord windows and PDF pages, returning the merged top-scored hits.
+    """Search Discord windows + PDF pages; merge by adjusted score.
 
-    ``doc_boost`` gently prioritises doc pages since they are authored
-    definitions of Tom's framework — tiebreakers go to the doc, not the chat.
+    Boosts are per-doc-author (see ``_doc_author_boost``). Tom-authored
+    PDFs get a strong lift so definitional queries about Tom's framework
+    surface his pages before Discord chatter or third-party books.
+    Pass ``doc_boost`` as a number to override with a flat boost.
     """
     query = (query or "").strip()
     if not query:
@@ -322,7 +337,13 @@ def mixed_semantic_search(
 
     if doc_mat is not None and doc_meta is not None and doc_page_ids is not None \
             and q.size == doc_mat.shape[1]:
-        scores = doc_mat @ q + doc_boost
+        cosines = doc_mat @ q
+        boosts = np.array(
+            [_doc_author_boost(m["author"]) if doc_boost is None else doc_boost
+             for m in doc_meta],
+            dtype=np.float32,
+        )
+        scores = cosines + boosts
         k = min(limit, scores.size)
         top = np.argpartition(-scores, k - 1)[:k]
         top = top[np.argsort(-scores[top])]

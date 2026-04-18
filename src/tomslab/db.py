@@ -174,6 +174,17 @@ CREATE TABLE IF NOT EXISTS document_page_embeddings (
 );
 CREATE INDEX IF NOT EXISTS idx_doc_page_embed_model ON document_page_embeddings(model);
 
+-- CLIP embeddings of the rendered PDF page images (for visual search).
+CREATE TABLE IF NOT EXISTS doc_page_image_embeddings (
+    page_id INTEGER PRIMARY KEY,
+    model TEXT NOT NULL,
+    dim INTEGER NOT NULL,
+    embedding BLOB NOT NULL,
+    generated_at TEXT,
+    FOREIGN KEY (page_id) REFERENCES document_pages(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_doc_page_img_embed_model ON doc_page_image_embeddings(model);
+
 -- ---- imports log (so we can resume / show history) -------------------------
 CREATE TABLE IF NOT EXISTS imports (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
