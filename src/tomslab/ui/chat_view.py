@@ -262,6 +262,16 @@ class ChatView(QWidget):
         self._render_empty_state()
         self._status.setText("")
 
+    def shutdown(self) -> None:
+        """Best-effort stop of the chat worker on window close."""
+        if self._worker is not None and self._worker.isRunning():
+            self._worker.quit()
+            self._worker.wait(1500)
+            if self._worker.isRunning():
+                self._worker.terminate()
+                self._worker.wait(500)
+            self._worker = None
+
     # ------------------------------------------------------------------
     # citation clicks
     # ------------------------------------------------------------------

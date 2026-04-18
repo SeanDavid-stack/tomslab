@@ -664,11 +664,26 @@ class MainWindow(QMainWindow):
     # teardown
     # ------------------------------------------------------------------
     def closeEvent(self, event) -> None:
-        if self._worker is not None and self._worker.isRunning():
-            self._worker.wait(2000)
-        if self._embed_worker is not None and self._embed_worker.isRunning():
-            self._embed_worker.wait(2000)
-        if self._image_embed_worker is not None and self._image_embed_worker.isRunning():
-            self._image_embed_worker.wait(2000)
-        self._conn.close()
+        # Close must mean close — a lingering QThread keeps the whole
+        # Python process alive invisibly. Stop each worker cleanly, then
+        # fall back to terminate() if it refuses to exit in time.
+        for worker in (self._worker, self._embed_worker, self._image_embed_worker):
+            if worker is not None and worker.isRunning():
+                worker.quit()
+                worker.wait(1500)
+                if worker.isRunning():
+                    worker.terminate()
+                    worker.wait(500)
+        # ChatView has its own worker
+        try:
+            self._chat.shutdown()
+        except Exception:
+            pass
+        try:
+            self._conn.close()
+        except Exception:
+            pass
         super().closeEvent(event)
+        # Belt and suspenders: tell Qt to fully quit after the window is gone.
+        from PyQt6.QtWidgets import QApplication
+        QApplication.instance().quit()
