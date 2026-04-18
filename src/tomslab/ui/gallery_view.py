@@ -228,9 +228,12 @@ def _load_thumb_icon(path: str) -> QIcon | None:
 
 
 class GalleryView(QWidget):
-    """Grid of thumbnails with click-to-jump-to-message."""
+    """Grid of thumbnails. Double-click or Enter opens the full-size
+    image viewer — previously this jumped to the source message which
+    was confusing when users are browsing charts."""
 
-    message_activated = pyqtSignal(str)   # emits message_id on double-click / Enter
+    image_opened = pyqtSignal(str)      # emits local_path on double-click / Enter
+    message_activated = pyqtSignal(str)  # kept for compat but unused by default
 
     def __init__(self, conn: sqlite3.Connection, parent: Any = None) -> None:
         super().__init__(parent)
@@ -255,7 +258,9 @@ class GalleryView(QWidget):
             "QListView { background: #1E1F22; color: #DBDEE1; border: none; }"
             "QListView::item { color: #DBDEE1; }"
         )
-        self._list.doubleClicked.connect(self._on_activated)
+        # Only listen to one activation signal — on Windows both
+        # doubleClicked and activated fire for a double-click, which
+        # would fire the handler twice and briefly open the viewer twice.
         self._list.activated.connect(self._on_activated)
         layout.addWidget(self._list, stretch=1)
 
@@ -311,6 +316,6 @@ class GalleryView(QWidget):
             )
 
     def _on_activated(self, idx: QModelIndex) -> None:
-        mid = self._model.data(idx, ROLE_MESSAGE_ID)
-        if mid:
-            self.message_activated.emit(str(mid))
+        path = self._model.data(idx, ROLE_PATH)
+        if path:
+            self.image_opened.emit(str(path))

@@ -44,8 +44,9 @@ from tomslab.search import SearchMode
 from tomslab.ui.chat_view import ChatView
 from tomslab.ui.concept_bar import ConceptChipBar
 from tomslab.ui.embed_worker import EmbedWorker
-from tomslab.ui.gallery_view import GalleryView
+from tomslab.ui.gallery_view import GalleryView, ROLE_PATH as GALLERY_ROLE_PATH
 from tomslab.ui.image_embed_worker import ImageEmbedWorker
+from tomslab.ui.image_viewer import ImageViewerDialog
 from tomslab.ui.import_worker import ImportWorker
 from tomslab.ui.message_delegate import MessageDelegate
 from tomslab.ui.message_model import MAX_BROWSE_ROWS, MessageListModel, ROLE_MESSAGE
@@ -83,9 +84,11 @@ class MainWindow(QMainWindow):
 
         self._model = MessageListModel(self._conn, self)
         self._delegate = MessageDelegate(self)
+        self._delegate.thumbnail_clicked.connect(self._open_image_viewer)
         self._worker: ImportWorker | None = None
         self._embed_worker: EmbedWorker | None = None
         self._image_embed_worker: ImageEmbedWorker | None = None
+        self._image_viewer: ImageViewerDialog | None = None
 
         self._search_debounce = QTimer(self)
         self._search_debounce.setSingleShot(True)
@@ -254,7 +257,10 @@ class MainWindow(QMainWindow):
 
         # --- gallery tab ------------------------------------------------
         self._gallery = GalleryView(self._conn, self)
-        self._gallery.message_activated.connect(self._jump_to_message)
+        # Double-click or Enter on a gallery thumbnail opens the image
+        # viewer instead of jumping to the message — the user is in
+        # "look at charts" mode when they're in the Gallery tab.
+        self._gallery.image_opened.connect(self._open_image_viewer)
 
         # --- ask tab ----------------------------------------------------
         self._chat = ChatView(self._conn, self)
@@ -411,6 +417,19 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # gallery → feed jump
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # image viewer
+    # ------------------------------------------------------------------
+    def _open_image_viewer(self, path: str) -> None:
+        """Reuse a single ImageViewerDialog — prevents double-clicks
+        from spawning multiple Windows. Debounced against identical
+        rapid re-opens of the same file."""
+        if not path:
+            return
+        if self._image_viewer is None:
+            self._image_viewer = ImageViewerDialog(self)
+        self._image_viewer.show_image(path)
+
     def _on_citation(self, kind: str, raw_id: str) -> None:
         """Ask-Tom citation click → jump to source."""
         if kind == "msg":
