@@ -20,6 +20,7 @@ from PyQt6.QtGui import (
     QPixmapCache,
 )
 from PyQt6.QtWidgets import (
+    QApplication,
     QComboBox,
     QFileDialog,
     QHBoxLayout,
@@ -1128,5 +1129,4 @@ class MainWindow(QMainWindow):
             pass
         super().closeEvent(event)
         # Belt and suspenders: tell Qt to fully quit after the window is gone.
-        from PyQt6.QtWidgets import QApplication
         QApplication.instance().quit()
