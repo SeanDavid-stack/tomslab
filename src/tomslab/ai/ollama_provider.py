@@ -27,10 +27,16 @@ class OllamaProvider(AIProvider):
         embed_model: str = DEFAULT_EMBED_MODEL,
         chat_model: str = DEFAULT_CHAT_MODEL,
         vision_model: str = DEFAULT_VISION_MODEL,
+        chat_timeout: float = 180.0,
     ) -> None:
         if _ollama is None:
             raise ProviderUnavailable("ollama python package not installed")
-        self._client = _ollama.Client(host=host) if host else _ollama.Client()
+        # Ollama client takes an optional timeout via httpx — pass through so
+        # a hung local call fails cleanly instead of spinning forever.
+        if host:
+            self._client = _ollama.Client(host=host, timeout=chat_timeout)
+        else:
+            self._client = _ollama.Client(timeout=chat_timeout)
         self._embed_model = embed_model
         self._chat_model = chat_model
         self._vision_model = vision_model

@@ -169,6 +169,13 @@ class ChatView(QWidget):
         # Bookmap in the same question).  Added via the paperclip or paste.
         self._attachment_paths: list[str] = []
 
+        # Elapsed-timer for the "Thinking..." state so the user always
+        # sees whether something is actually happening or the call is hung.
+        self._think_started: float = 0.0
+        self._think_timer = QTimer(self)
+        self._think_timer.setInterval(500)
+        self._think_timer.timeout.connect(self._tick_thinking)
+
         self._build_ui()
         self._render_empty_state()
 
@@ -622,7 +629,14 @@ class ChatView(QWidget):
         self._history.append(ChatTurn(role="user", content=display))
         self._render_transcript()
         self._set_busy(True)
-        self._status.setText("Thinking…")
+        # Kick off the elapsed-time ticker so the user sees progress.
+        self._think_started = time.time()
+        has_image = bool(self._attachment_paths)
+        self._status.setText(
+            "Thinking… 0:00"
+            + ("   (vision model — first call may take 30–90s)" if has_image else "")
+        )
+        self._think_timer.start()
 
         attachments = list(self._attachment_paths)
         self._worker = ChatWorker(
@@ -635,7 +649,25 @@ class ChatView(QWidget):
         # Consume the attachment — a single ask uses it once.
         self._clear_attachment()
 
+    def _tick_thinking(self) -> None:
+        elapsed = time.time() - self._think_started
+        mins = int(elapsed // 60)
+        secs = int(elapsed % 60)
+        has_image = any(
+            t.role == "user" and "[attached:" in t.content
+            for t in self._history[-1:]
+        )
+        hint = ""
+        if has_image and elapsed > 60:
+            hint = "   (local vision model — this is slow)"
+        elif elapsed > 90:
+            hint = "   (taking longer than expected…)"
+        elif has_image:
+            hint = "   (vision model — first call may take 30–90s)"
+        self._status.setText(f"Thinking… {mins}:{secs:02d}{hint}")
+
     def _on_answered(self, result: AnswerResult) -> None:
+        self._think_timer.stop()
         self._worker = None
         self._last_answer_sources = result.sources
         self._last_answer_citations = list(result.citations)
@@ -649,6 +681,7 @@ class ChatView(QWidget):
                 f"{result.provider_used} (local fallback) instead._\n\n" + content
             )
 
+        elapsed = time.time() - self._think_started if self._think_started else 0
         self._history.append(ChatTurn(role="assistant", content=content))
         self._render_transcript()
         self._set_busy(False)
@@ -656,11 +689,13 @@ class ChatView(QWidget):
         n_src = len(result.sources)
         provider = result.provider_used or ""
         tail = f" · answered by {provider}" if provider else ""
+        took = f" · took {elapsed:.1f}s" if elapsed else ""
         self._status.setText(
-            f"{n_src} sources retrieved · {n_cites} citations{tail} · Ctrl+Enter to send"
+            f"{n_src} sources · {n_cites} citations{tail}{took} · Ctrl+Enter to send"
         )
 
     def _on_failed(self, err: str) -> None:
+        self._think_timer.stop()
         self._worker = None
         friendly = _friendly_error(err)
         self._history.append(ChatTurn(role="assistant", content=friendly))
