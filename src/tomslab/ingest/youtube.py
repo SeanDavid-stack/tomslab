@@ -314,8 +314,16 @@ def download_audio(
     for clients in client_chain:
         if produced is not None:
             break
+        # Mobile-app clients (android, ios) don't accept cookies — yt-dlp
+        # refuses to use them when `cookiesfrombrowser` is set and falls
+        # back to web, which defeats the purpose. Strip cookies for any
+        # non-web client chain.
+        uses_cookies = clients is None or any(
+            c.startswith("web") or c == "mweb" for c in clients
+        )
+        effective_browser = browser if uses_cookies else None
         for i, fmt in enumerate(format_chain):
-            opts = _yt_common_opts(browser)
+            opts = _yt_common_opts(effective_browser)
             opts.update({
                 "format": fmt,
                 "outtmpl": tmp_template,
