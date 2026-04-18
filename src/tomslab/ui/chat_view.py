@@ -12,8 +12,10 @@ import html
 import re
 import sqlite3
 
+import tempfile
+import time
 from pathlib import Path
-from PyQt6.QtCore import Qt, QUrl, pyqtSignal
+from PyQt6.QtCore import QMimeData, Qt, QUrl, pyqtSignal
 from PyQt6.QtGui import QKeyEvent, QPixmap, QTextCursor
 from PyQt6.QtWidgets import (
     QFileDialog,
@@ -88,9 +90,11 @@ def _avatar_for(name: str) -> tuple[str, str]:
 
 
 class _InputBox(QTextEdit):
-    """Text input that submits on Ctrl+Enter / Cmd+Enter and grows with content."""
+    """Text input that submits on Ctrl+Enter / Cmd+Enter, grows with content,
+    and attaches clipboard images as chart uploads on Ctrl+V."""
 
     submit = pyqtSignal()
+    image_pasted = pyqtSignal(str)       # emits path of a PNG written to disk
 
     _MIN_H = 64
     _MAX_H = 280
@@ -101,6 +105,29 @@ class _InputBox(QTextEdit):
         self.setMaximumHeight(self._MAX_H)
         self.document().documentLayout().documentSizeChanged.connect(self._autogrow)
         self._autogrow()
+
+    def canInsertFromMimeData(self, source: QMimeData) -> bool:     # noqa: N802
+        # Accept clipboard pastes that contain an image (normal text/html
+        # pastes fall through to the default handler).
+        if source.hasImage() or source.hasUrls():
+            return True
+        return super().canInsertFromMimeData(source)
+
+    def insertFromMimeData(self, source: QMimeData) -> None:        # noqa: N802
+        if source.hasImage():
+            pix = QPixmap(source.imageData())
+            if pix.isNull():
+                # try via rgba tag
+                img = source.imageData()
+                if img is not None:
+                    pix = QPixmap.fromImage(img)
+            if not pix.isNull():
+                path = _dump_pixmap_to_tmp(pix)
+                if path:
+                    self.image_pasted.emit(path)
+                    return
+        # Plain-text / HTML / file-URLs fall through unchanged.
+        super().insertFromMimeData(source)
 
     def _autogrow(self) -> None:
         # Account for frame + internal padding; QTextDocument height is
@@ -267,6 +294,7 @@ class ChatView(QWidget):
             f"QTextEdit:focus {{ border: 1px solid {COLOR_PRIMARY}; }}"
         )
         self._input.submit.connect(self._on_send)
+        self._input.image_pasted.connect(self._on_image_pasted)
         input_row.addWidget(self._input, stretch=1)
 
         button_col = QVBoxLayout()
@@ -712,6 +740,26 @@ class ChatView(QWidget):
         self._attachment_label.setText("")
         self._attachment_frame.setVisible(False)
 
+    def _on_image_pasted(self, path: str) -> None:
+        """Handler fired when the user pastes a screenshot into the composer."""
+        self._attachment_path = path
+        pix = QPixmap(path)
+        if pix.isNull():
+            self._attachment_path = None
+            return
+        thumb = pix.scaled(
+            56, 40,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self._attachment_thumb.setPixmap(thumb)
+        self._attachment_label.setText(
+            f"Pasted chart (<b>{Path(path).name}</b>) "
+            f"<span style='color:{COLOR_DIM};'>· will be sent with your next question</span>"
+        )
+        self._attachment_frame.setVisible(True)
+        self._status.setText("📋 Chart pasted — type your question and Ctrl+Enter to send")
+
     def _on_anchor_clicked(self, url: QUrl) -> None:
         href = url.toString()
         if href.startswith("sample:"):
@@ -799,6 +847,21 @@ def _short_doc_title(title: str) -> str:
     # generic: keep first 3 words, cap at 22 chars
     short = " ".join(t.split()[:3])
     return short[:22] + ("…" if len(short) > 22 else "")
+
+
+def _dump_pixmap_to_tmp(pix: QPixmap) -> str:
+    """Save a pasted clipboard image as a fresh PNG under %TEMP% and return
+    the path. Files are unique-per-paste so nothing overwrites prior
+    attachments that might still be in flight."""
+    try:
+        tmpdir = Path(tempfile.gettempdir()) / "TomsLab_paste"
+        tmpdir.mkdir(parents=True, exist_ok=True)
+        fname = f"paste_{int(time.time() * 1000)}.png"
+        path = tmpdir / fname
+        pix.save(str(path), "PNG")
+        return str(path)
+    except Exception:
+        return ""
 
 
 def _friendly_error(err: str) -> str:
