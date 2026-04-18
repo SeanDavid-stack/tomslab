@@ -125,10 +125,12 @@ class GeminiProvider(AIProvider):
         if system:
             config = genai_types.GenerateContentConfig(system_instruction=system)
 
-        # Auto-retry on transient 503 / 429. Google's free tier intermittently
-        # returns UNAVAILABLE under load; most calls succeed on the next try.
+        # Short retry window. Chat.ask() carries a fallback chain (Ollama)
+        # so we don't want to burn 20s retrying Gemini for a 503 that often
+        # stays 503 for minutes — one fast retry, then surrender so the
+        # caller falls back to local llama.
         last_exc: Exception | None = None
-        delays = [1.5, 4.0, 10.0]
+        delays = [1.5]
         for attempt, delay in enumerate([0.0] + delays):
             if delay:
                 time.sleep(delay)
@@ -149,13 +151,11 @@ class GeminiProvider(AIProvider):
                 if not is_transient:
                     raise ProviderError(f"gemini chat failed: {msg[:300]}") from exc
                 log.warning(
-                    "Gemini transient error (attempt %d): %s",
-                    attempt + 1, msg[:200],
+                    "Gemini transient error (attempt %d/%d): %s",
+                    attempt + 1, len(delays) + 1, msg[:200],
                 )
 
-        # all retries exhausted
-        # Surface a friendly, short message — the UI renders this verbatim.
+        # Surrender quickly — the fallback chain (Ollama) takes it from here.
         raise ProviderError(
-            "Gemini is currently overloaded (HTTP 503). "
-            "This is usually brief — please try again in a moment."
+            "Gemini is currently overloaded (HTTP 503) — falling back to local."
         )
