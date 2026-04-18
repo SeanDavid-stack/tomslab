@@ -371,8 +371,25 @@ class MainWindow(QMainWindow):
             self._mode_combo.blockSignals(False)
 
     def _on_concept_clicked(self, term: str) -> None:
-        """Glossary chip → jump to Feed tab and run a keyword search."""
-        self._tabs.setCurrentIndex(0)
+        """Glossary chip click routes based on the active tab.
+
+          * Feed / Gallery: set the search bar to the term (both tabs follow).
+          * Ask Tom: drop the term in the chat composer so the user can ask
+            a question about it without leaving the chat.
+        """
+        current = self._tabs.currentIndex()
+        if current == 2:   # Ask Tom
+            # Don't clobber if the composer already has an in-progress draft.
+            existing = self._chat._input.toPlainText().strip()
+            if existing:
+                self._chat._input.setPlainText(f"{existing} {term}".strip())
+            else:
+                self._chat._input.setPlainText(f"What is {term}?")
+            self._chat._input.setFocus()
+            return
+
+        # Feed / Gallery — flip to Keyword mode and run the search. Both
+        # tabs share the search bar so whichever you were on stays active.
         self._mode_combo.blockSignals(True)
         idx = self._mode_combo.findData("keyword")
         if idx >= 0:
