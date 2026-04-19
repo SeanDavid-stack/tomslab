@@ -103,6 +103,11 @@ class _InputBox(QTextEdit):
         super().__init__(parent)
         self.setMinimumHeight(self._MIN_H)
         self.setMaximumHeight(self._MAX_H)
+        # Plain-text mode: paste-from-anywhere never carries rich-text
+        # formatting (font size, colour, etc.) that would stick to every
+        # subsequent keystroke. Without this, pasting a big-font snippet
+        # from a webpage permanently enlarges the composer.
+        self.setAcceptRichText(False)
         self.document().documentLayout().documentSizeChanged.connect(self._autogrow)
         self._autogrow()
 
