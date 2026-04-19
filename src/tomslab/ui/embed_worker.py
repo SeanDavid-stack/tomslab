@@ -14,8 +14,8 @@ class EmbedWorker(QThread):
     finished_ok = pyqtSignal(int)           # count embedded
     failed = pyqtSignal(str)
 
-    def __init__(self, scope: str = "both", parent=None) -> None:
-        """scope: 'windows' | 'docs' | 'both'"""
+    def __init__(self, scope: str = "all", parent=None) -> None:
+        """scope: 'windows' | 'docs' | 'videos' | 'both' (legacy) | 'all'"""
         super().__init__(parent)
         self._scope = scope
 
@@ -25,17 +25,23 @@ class EmbedWorker(QThread):
             dbmod.initialise(conn)
             provider = registry.get_embed_provider(conn)
             total_done = 0
-            if self._scope in ("windows", "both"):
+            if self._scope in ("windows", "both", "all"):
                 total_done += embed_service.embed_pending(
                     conn,
                     provider,
                     progress=lambda d, t, s: self.progress.emit(d, t, f"windows: {s}"),
                 )
-            if self._scope in ("docs", "both"):
+            if self._scope in ("docs", "both", "all"):
                 total_done += embed_service.embed_pending_doc_pages(
                     conn,
                     provider,
                     progress=lambda d, t, s: self.progress.emit(d, t, f"doc pages: {s}"),
+                )
+            if self._scope in ("videos", "all"):
+                total_done += embed_service.embed_pending_video_chunks(
+                    conn,
+                    provider,
+                    progress=lambda d, t, s: self.progress.emit(d, t, f"video chunks: {s}"),
                 )
             conn.close()
             self.finished_ok.emit(total_done)

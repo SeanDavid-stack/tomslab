@@ -796,6 +796,27 @@ def ingest_folder(
             conn.commit()
             errors.append((vid, str(exc)[:300]))
 
+    # After transcription finishes, embed the newly-created chunks. Without
+    # this step Ask Tom's semantic search can't retrieve video content.
+    # Failure here is non-fatal — transcripts survive, embeddings can be
+    # built later via File → Build text embeddings.
+    embedded = 0
+    try:
+        from tomslab.ai import registry
+        from tomslab import embed_service
+        provider = registry.get_embed_provider(conn)
+        if progress:
+            progress("Embedding video chunks", total, total)
+        embedded = embed_service.embed_pending_video_chunks(
+            conn, provider,
+            progress=lambda d, t, s: (progress("Embedding " + s, d, t)
+                                      if progress else None),
+        )
+        from tomslab.semantic import invalidate_video_cache
+        invalidate_video_cache()
+    except Exception as exc:
+        log.warning("post-transcription embedding failed: %s", exc)
+
     if progress:
         progress("Done", total, total)
     return {
@@ -803,5 +824,6 @@ def ingest_folder(
         "newly_added_rows": added,
         "processed": done,
         "failed": len(errors),
+        "embedded": embedded,
         "errors": errors,
     }

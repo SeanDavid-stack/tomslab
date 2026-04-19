@@ -751,12 +751,14 @@ class MainWindow(QMainWindow):
             return
         pending_windows = embed_service.pending_count(self._conn)
         pending_docs = embed_service.pending_doc_pages_count(self._conn)
-        total_pending = pending_windows + pending_docs
+        pending_videos = embed_service.pending_video_chunks_count(self._conn)
+        total_pending = pending_windows + pending_docs + pending_videos
         if total_pending == 0:
             QMessageBox.information(
                 self,
                 "Nothing to embed",
-                "All conversation windows and doc pages are already embedded.",
+                "All conversation windows, doc pages, and video chunks are "
+                "already embedded.",
             )
             return
 
@@ -765,15 +767,18 @@ class MainWindow(QMainWindow):
             desc_lines.append(f"  • {pending_windows:,} conversation windows")
         if pending_docs:
             desc_lines.append(f"  • {pending_docs:,} PDF doc pages")
+        if pending_videos:
+            desc_lines.append(f"  • {pending_videos:,} video transcript chunks")
         desc = "\n".join(desc_lines)
 
         reply = QMessageBox.question(
             self,
             "Build text embeddings",
             f"Create embeddings for:\n{desc}\n\n"
-            "This enables Semantic search (Discord + Tom's reference PDFs merged). "
-            "Uses the embedding provider configured in Settings → AI Providers. "
-            "Runs in the background; you can keep browsing.",
+            "This enables Semantic search (Discord + Tom's reference PDFs + "
+            "TomTube transcripts merged). Uses the embedding provider "
+            "configured in Settings → AI Providers. Runs in the background; "
+            "you can keep browsing.",
             QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Ok,
         )
@@ -784,7 +789,7 @@ class MainWindow(QMainWindow):
         self._progress_bar.setRange(0, 0)
         self._status_label.setText("Embedding…")
 
-        self._embed_worker = EmbedWorker(scope="both", parent=self)
+        self._embed_worker = EmbedWorker(scope="all", parent=self)
         self._embed_worker.progress.connect(self._on_embed_progress)
         self._embed_worker.finished_ok.connect(self._on_embed_finished)
         self._embed_worker.failed.connect(self._on_embed_failed)
@@ -803,9 +808,11 @@ class MainWindow(QMainWindow):
         self._embed_worker = None
         semantic.invalidate_cache()
         semantic.invalidate_doc_cache()
+        semantic.invalidate_video_cache()
         self._refresh_status()
         QMessageBox.information(
-            self, "Embeddings done", f"Embedded {n:,} new windows / doc pages."
+            self, "Embeddings done",
+            f"Embedded {n:,} new windows / doc pages / video chunks.",
         )
 
     def _on_embed_failed(self, err: str) -> None:

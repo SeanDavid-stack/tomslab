@@ -193,3 +193,85 @@ def embed_pending_doc_pages(
 
     progress(total, total, "Done")
     return done
+
+
+def pending_video_chunks_count(conn: sqlite3.Connection) -> int:
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS n FROM video_chunks c
+         WHERE COALESCE(c.text, '') != ''
+           AND NOT EXISTS (
+                SELECT 1 FROM video_chunk_embeddings ve WHERE ve.chunk_id = c.id
+           )
+        """
+    ).fetchone()
+    return int(row["n"] or 0)
+
+
+def embed_pending_video_chunks(
+    conn: sqlite3.Connection,
+    provider: AIProvider,
+    progress: ProgressFn = _noop,
+    batch_size: int = BATCH_SIZE,
+) -> int:
+    """Embed every transcript chunk that hasn't been embedded yet. This is
+    what makes Ask Tom able to surface video timestamps — without it the
+    TomTube corpus is invisible to semantic search."""
+    if not provider.supports_embed():
+        raise ProviderError(f"{provider.name} does not support embeddings")
+
+    model = provider.embedding_model_name()
+    dim = provider.embedding_dim()
+
+    total = pending_video_chunks_count(conn)
+    if total == 0:
+        progress(0, 0, "No video chunks need embedding.")
+        return 0
+
+    progress(0, total, f"Embedding video chunks with {provider.name}/{model}…")
+
+    done = 0
+    while True:
+        rows = conn.execute(
+            """
+            SELECT c.id AS id, c.text AS text
+              FROM video_chunks c
+             WHERE COALESCE(c.text, '') != ''
+               AND NOT EXISTS (
+                    SELECT 1 FROM video_chunk_embeddings ve WHERE ve.chunk_id = c.id
+               )
+             ORDER BY c.id
+             LIMIT ?
+            """,
+            (batch_size,),
+        ).fetchall()
+        if not rows:
+            break
+
+        texts = [(r["text"] or "")[:MAX_TEXT_CHARS] for r in rows]
+        vectors = provider.embed_texts(texts)
+        if len(vectors) != len(rows):
+            raise ProviderError(
+                f"provider returned {len(vectors)} embeddings for {len(rows)} inputs"
+            )
+
+        now = datetime.now(timezone.utc).isoformat()
+        payload = []
+        for r, v in zip(rows, vectors):
+            arr = np.asarray(v, dtype=np.float32)
+            if arr.size != dim:
+                dim = arr.size
+            payload.append((int(r["id"]), model, int(arr.size), arr.tobytes(), now))
+
+        conn.executemany(
+            "INSERT OR REPLACE INTO video_chunk_embeddings("
+            "chunk_id, model, dim, embedding, generated_at"
+            ") VALUES (?,?,?,?,?)",
+            payload,
+        )
+        conn.commit()
+        done += len(rows)
+        progress(done, total, f"{done:,} / {total:,}")
+
+    progress(total, total, "Done")
+    return done
