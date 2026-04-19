@@ -340,6 +340,34 @@ def _convert_to_mp3(src: Path, bitrate_kbps: int) -> Path:
     return tgt
 
 
+def download_archive_path() -> Path:
+    """Shared download-archive file recording every video id Tom's Lab has
+    finished downloading. yt-dlp consults this BEFORE issuing any network
+    request, so resume passes on already-downloaded videos cost zero
+    YouTube API calls — which is how we stay well under the rate-limiter
+    when users click Import for the second time."""
+    return data_dir() / "youtube_download_archive.txt"
+
+
+def _already_downloaded_via_archive(video_id: str) -> bool:
+    """True if the archive file records this id as complete.
+
+    Matches yt-dlp's archive format: "youtube VIDEO_ID\\n" per line.
+    Cheap to check — a tiny text file read each call."""
+    ap = download_archive_path()
+    if not ap.exists():
+        return False
+    needle = f"youtube {video_id}"
+    try:
+        with ap.open("r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip() == needle:
+                    return True
+    except OSError:
+        return False
+    return False
+
+
 def download_audio(video_id: str, bitrate_kbps: int = 96) -> Path:
     """Download a single video's audio via yt-dlp subprocess.
 
@@ -347,13 +375,25 @@ def download_audio(video_id: str, bitrate_kbps: int = 96) -> Path:
     we don't need a working ffprobe. Tom's Lab's faster-whisper pipeline
     reads .webm directly, and the folder-import path does the same.
 
-    Resumable: if a non-empty file for this video_id already exists in
-    any supported audio extension, returns that path immediately.
+    Two layers of resume:
+      1. If a non-empty file for this video_id already exists in any
+         supported audio extension, return it immediately — no subprocess.
+      2. If yt-dlp's download-archive records this id as complete, skip
+         too (covers cases where the file was moved/renamed but we
+         remember having fetched it).
     """
     for ext in (".webm", ".m4a", ".opus", ".mp3"):
         existing = videos_dir() / f"{video_id}{ext}"
         if existing.exists() and existing.stat().st_size > 1024:
             return existing
+    if _already_downloaded_via_archive(video_id):
+        # Nothing on disk but the archive says we've done this one —
+        # caller will get a clearer error than trying to re-fetch it.
+        raise RuntimeError(
+            f"video {video_id} is recorded in the download archive but "
+            f"its file is missing from {videos_dir()}. Remove the id from "
+            f"{download_archive_path()} if you want to re-download it."
+        )
 
     if not _node_on_path():
         raise YouTubeNotSignedInError(
@@ -367,6 +407,13 @@ def download_audio(video_id: str, bitrate_kbps: int = 96) -> Path:
     out_template = str(videos_dir() / f"{video_id}.%(ext)s")
     log.info("Downloading audio for %s (yt-dlp/firefox+bgutil)", video_id)
 
+    # Rate-limit-safe pacing matches the standalone batch file
+    # (download_tom_videos.bat):
+    #   • 30-180s random sleep between videos (6x spread, not a fixed
+    #     cadence that anti-bot heuristics could fingerprint)
+    #   • 2s sleep between individual HTTP requests
+    #   • --download-archive records every completed video id so
+    #     subsequent passes skip them without hitting YouTube at all
     cmd = [
         "python", "-m", "yt_dlp",
         "--cookies-from-browser", "firefox",
@@ -375,8 +422,9 @@ def download_audio(video_id: str, bitrate_kbps: int = 96) -> Path:
         "--format", "bestaudio[ext=webm]/bestaudio/best",
         "--no-overwrites", "--continue",
         "--no-warnings",
-        "--sleep-interval", "20", "--max-sleep-interval", "50",
-        "--sleep-requests", "1",
+        "--sleep-interval", "30", "--max-sleep-interval", "180",
+        "--sleep-requests", "2",
+        "--download-archive", str(download_archive_path()),
         "-o", out_template,
         url,
     ]
