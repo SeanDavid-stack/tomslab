@@ -316,6 +316,20 @@ class ChatView(QWidget):
         self._attachment_label = QLabel("")
         self._attachment_lay.addWidget(self._attachment_label)
         self._attachment_lay.addStretch(1)
+        # Quick-action: a canned "annotate this chart" prompt so users
+        # don't have to remember which question phrasing makes the model
+        # do a full Tom-framework feature labelling. Appears only when
+        # an attachment is present.
+        self._annotate_btn = QPushButton("📍 Annotate this chart")
+        self._annotate_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._annotate_btn.setToolTip(
+            "Prefill the composer with a structured prompt asking the "
+            "model to label every Tom-framework feature visible on the "
+            "attached chart — NVPOCs, VPOCs, IB extremes, squeezes, "
+            "absorption, and more — with brief explanations of each."
+        )
+        self._annotate_btn.clicked.connect(self._on_annotate_chart)
+        self._attachment_lay.addWidget(self._annotate_btn)
         self._attachment_clear = QPushButton("Remove all")
         self._attachment_clear.clicked.connect(self._clear_attachment)
         self._attachment_lay.addWidget(self._attachment_clear)
@@ -996,6 +1010,36 @@ class ChatView(QWidget):
     def _clear_attachment(self) -> None:
         self._attachment_paths = []
         self._refresh_attachments_preview()
+
+    def _on_annotate_chart(self) -> None:
+        """Quick-action to drop a purpose-built annotation prompt into the
+        composer. The model sees the attached chart(s) + this structured
+        instruction and returns a labeled inventory of Tom's framework
+        features rather than a free-form answer."""
+        if not self._attachment_paths:
+            return
+        prompt = (
+            "Annotate this chart through Tom B's framework. For every "
+            "feature you can identify visually, list it as a bullet with:\n"
+            "  • **Feature name** (e.g. NVPOC, VPOC, IB high, IB low, "
+            "RTH open, squeeze pattern, absorption, exhaustion, "
+            "continuation setup)\n"
+            "  • Approximate price level (read ONLY from the image, "
+            "never from retrieved messages)\n"
+            "  • One-sentence explanation of why it matters per Tom's "
+            "framework and how he typically uses it\n"
+            "\n"
+            "If multiple charts are attached, label each image's timeframe "
+            "up front (HTF vs intraday) and annotate them separately. "
+            "End with a brief 'what Tom would likely watch for next' "
+            "reading if the structure suggests one — labeled as an "
+            "inference, not a recommendation."
+        )
+        self._input.setPlainText(prompt)
+        self._input.setFocus()
+        self._status.setText(
+            "📍 Chart-annotation prompt loaded — Ctrl+Enter to send"
+        )
 
     def _on_image_pasted(self, path: str) -> None:
         """Handler fired when the user pastes a screenshot into the composer.
