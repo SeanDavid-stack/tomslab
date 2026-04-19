@@ -174,9 +174,21 @@ class ImageViewerDialog(QDialog):
             self._image.resize(scaled.size())
             self._zoom_label.setText(f"{int(self._zoom * 100)}%")
 
-    def _zoom_by(self, factor: float) -> None:
+    def _zoom_by(self, factor: float, anchor_vp=None) -> None:
+        """Apply a zoom factor. When ``anchor_vp`` is a QPoint in viewport
+        coordinates, scroll so the original pixel under that point stays
+        under it after zooming — 'zoom at cursor'. Without an anchor,
+        zooms from the image center (toolbar +/− buttons)."""
         if self._pixmap is None:
             return
+
+        # Capture pre-zoom state so we can re-anchor afterwards.
+        hbar = self._scroll.horizontalScrollBar()
+        vbar = self._scroll.verticalScrollBar()
+        old_scroll_x = hbar.value()
+        old_scroll_y = vbar.value()
+        old_image_size = self._image.size()
+
         if self._fit_to_window:
             # treat "Fit" as baseline, then zoom from there
             avail = self._scroll.viewport().size()
@@ -192,6 +204,32 @@ class ImageViewerDialog(QDialog):
             self._fit_to_window = False
         self._zoom = max(self._MIN_ZOOM, min(self._MAX_ZOOM, self._zoom * factor))
         self._apply_pixmap()
+
+        if anchor_vp is None or old_image_size.width() == 0 \
+                or old_image_size.height() == 0:
+            return
+
+        # Where was the cursor in image-widget-local coords before zoom?
+        # The image can be smaller than the viewport — in that case the
+        # scroll area centers it, so we offset by that centering gap.
+        vp_w = self._scroll.viewport().width()
+        vp_h = self._scroll.viewport().height()
+        off_x = max(0, (vp_w - old_image_size.width()) // 2)
+        off_y = max(0, (vp_h - old_image_size.height()) // 2)
+        img_x = anchor_vp.x() + old_scroll_x - off_x
+        img_y = anchor_vp.y() + old_scroll_y - off_y
+
+        # Scale those coords to the new image size.
+        new_size = self._image.size()
+        if old_image_size.width() == 0 or old_image_size.height() == 0:
+            return
+        new_img_x = img_x * new_size.width() / old_image_size.width()
+        new_img_y = img_y * new_size.height() / old_image_size.height()
+
+        new_off_x = max(0, (vp_w - new_size.width()) // 2)
+        new_off_y = max(0, (vp_h - new_size.height()) // 2)
+        hbar.setValue(int(new_img_x - anchor_vp.x() + new_off_x))
+        vbar.setValue(int(new_img_y - anchor_vp.y() + new_off_y))
 
     def _fit(self) -> None:
         self._fit_to_window = True
@@ -227,11 +265,11 @@ class ImageViewerDialog(QDialog):
         super().keyPressEvent(event)
 
     def wheelEvent(self, event) -> None:
-        """Mouse-wheel zoom. Wheel up zooms in, wheel down zooms out.
-        Shift+wheel leaves scrolling alone (pan horizontally in the
-        scroll area's native behavior). No modifier required — this is
-        an image viewer, not a doc reader, so zoom is the natural
-        default."""
+        """Mouse-wheel zoom, anchored at the cursor. Wheel up zooms in,
+        wheel down zooms out. The pixel under the cursor stays put while
+        the rest of the image grows or shrinks around it. Shift+wheel
+        falls through so the scroll area's native horizontal-pan
+        behavior still works when you're zoomed in."""
         delta = event.angleDelta().y()
         if delta == 0:
             super().wheelEvent(event)
@@ -240,5 +278,14 @@ class ImageViewerDialog(QDialog):
         if mods & Qt.KeyboardModifier.ShiftModifier:
             super().wheelEvent(event)
             return
-        self._zoom_by(self._ZOOM_STEP if delta > 0 else 1 / self._ZOOM_STEP)
+        factor = self._ZOOM_STEP if delta > 0 else 1 / self._ZOOM_STEP
+        # Translate the event's global-ish position into the image
+        # widget's local coordinate system so we know what pixel the
+        # cursor is over — that's our anchor.
+        try:
+            pos = event.position().toPoint()
+        except AttributeError:
+            pos = event.pos()
+        anchor_in_viewport = self._scroll.viewport().mapFrom(self, pos)
+        self._zoom_by(factor, anchor_vp=anchor_in_viewport)
         event.accept()
