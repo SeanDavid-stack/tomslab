@@ -507,17 +507,21 @@ class ChatView(QWidget):
                 href = f"{kind}:{raw}"
                 friendly = labels.get(href) or {"msg": "msg", "doc": "doc",
                                                 "vid": "▶ video"}[kind]
+                # Whitespace before each chip (&nbsp;&nbsp;) keeps them
+                # visually separated — QTextBrowser strips plain spaces
+                # between inline-level elements in rich-text rendering.
                 chips.append(
-                    f'<a href="{html.escape(href)}" '
+                    f'&nbsp;&nbsp;<a href="{html.escape(href)}" '
                     f'style="color: {style["fg"]}; text-decoration: none; '
                     f'background: {style["bg"]}; padding: 2px 8px;'
-                    f' border-radius: 4px; margin-right: 6px; font-size: 11px;'
+                    f' border-radius: 4px; font-size: 11px;'
                     f' font-weight: 500;">{html.escape(friendly)}</a>'
                 )
             rows.append(
-                f'<div style="margin: 4px 0; font-size: 11px;">'
-                f'<span style="color: {COLOR_DIM}; margin-right: 8px;">'
+                f'<div style="margin: 6px 0; font-size: 11px;">'
+                f'<span style="color: {COLOR_DIM};">'
                 f'{emoji} <b>{heading}</b></span>'
+                f'&nbsp;&nbsp;&nbsp;'
                 f'{"".join(chips)}</div>'
             )
 
@@ -615,7 +619,10 @@ class ChatView(QWidget):
                 if len(nick) > 18:
                     nick = nick[:16] + "…"
                 ts = (r["timestamp"] or "")
-                date = _fmt_short_ts(ts)
+                # Day-level precision so two different messages from the
+                # same author in the same month are distinguishable in
+                # the sources panel.
+                date = _fmt_day_ts(ts) or _fmt_short_ts(ts)
                 label = f"{nick} · {date}" if date else nick
                 out[f"msg:{r['id']}"] = label
 
@@ -1040,6 +1047,21 @@ def _fmt_short_ts(iso_ts: str) -> str:
         return f"{_MONTHS_SHORT[m - 1]} {y}"
     except Exception:
         return iso_ts[:7]
+
+
+def _fmt_day_ts(iso_ts: str) -> str:
+    """'2023-05-08T15:30:00-04:00' -> 'May 8, 2023'. Day-level precision
+    so two messages from the same author in the same month get distinct
+    chip labels in the Sources panel."""
+    if not iso_ts:
+        return ""
+    try:
+        y = int(iso_ts[:4])
+        m = int(iso_ts[5:7])
+        d = int(iso_ts[8:10])
+        return f"{_MONTHS_SHORT[m - 1]} {d}, {y}"
+    except Exception:
+        return ""
 
 
 def _fmt_short_timestamp(sec: float) -> str:

@@ -164,7 +164,14 @@ class AnswerResult:
     fallback_reason: str = ""              # populated when we had to fall back
 
 
-CITATION_RE = re.compile(r"\[(msg|doc|vid):([\w:\-]+)\]")
+# Matches citations in any wrapping the LLM might emit:
+#   [msg:123]              — ideal form
+#   [msg:123, msg:456]     — comma-separated in one bracket (common)
+#   (vid:642)              — parenthesised
+#   bare "msg:123"         — no wrapping at all
+# All four get linkified. Word boundary anchors keep it from matching
+# random tokens like "http://site/path:name".
+CITATION_RE = re.compile(r"(?<![A-Za-z0-9_])(msg|doc|vid):([A-Za-z0-9_\-]+)")
 
 
 def _fmt_timestamp(sec: float) -> str:
