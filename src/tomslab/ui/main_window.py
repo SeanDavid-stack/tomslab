@@ -89,6 +89,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle(f"{__app_name__} v{__version__}")
         self.resize(1200, 820)
+        self._center_on_primary_screen()
         self.setAcceptDrops(True)
         self._apply_dark_palette()
 
@@ -190,6 +191,22 @@ class MainWindow(QMainWindow):
         pal.setColor(QPalette.ColorRole.ToolTipBase, QColor("#2B2D31"))
         pal.setColor(QPalette.ColorRole.ToolTipText, QColor("#DBDEE1"))
         self.setPalette(pal)
+
+    def _center_on_primary_screen(self) -> None:
+        """Position Tom's Lab in the center of the user's primary monitor
+        on every launch. Without this, Qt restores the last-used position,
+        which can leave the window on a secondary / no-longer-connected
+        monitor and make the app appear invisible."""
+        from PyQt6.QtGui import QGuiApplication
+        screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+        geo = screen.availableGeometry()
+        w = min(self.width(), max(800, int(geo.width() * 0.9)))
+        h = min(self.height(), max(600, int(geo.height() * 0.9)))
+        self.resize(w, h)
+        self.move(geo.x() + (geo.width() - w) // 2,
+                  geo.y() + (geo.height() - h) // 2)
 
     def showEvent(self, event) -> None:   # type: ignore[override]
         """Force the app window to the foreground the FIRST time it's
