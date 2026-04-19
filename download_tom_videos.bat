@@ -18,6 +18,10 @@ REM ============================================================
 set TARGET_DIR=D:\Tom Videos
 set URL_LIST=D:\Toms Lab\tom_video_urls_fresh.txt
 set BGUTIL=C:\Users\seane\bgutil-ytdlp-pot-provider\server\build\generate_once.js
+REM Persistent ledger of finished videos (yt-dlp skips anything
+REM listed here BEFORE touching the network — cuts resume-pass
+REM YouTube hits from ~450 to zero on already-done items).
+set ARCHIVE=D:\Tom Videos\_downloaded_ids.txt
 
 if not exist "%TARGET_DIR%" mkdir "%TARGET_DIR%"
 
@@ -33,7 +37,7 @@ echo ==========================================================
 echo   Pass #%ATTEMPT%  -  starting yt-dlp
 echo ==========================================================
 
-"D:\Toms Lab\.venv\Scripts\python.exe" -m yt_dlp --cookies-from-browser firefox --js-runtimes node --extractor-args "youtubepot-bgutilscript:script_path=%BGUTIL%" --format "bestaudio[ext=webm]/bestaudio/best" --no-overwrites --continue --ignore-errors --no-warnings --sleep-interval 20 --max-sleep-interval 50 --sleep-requests 1 -o "%TARGET_DIR%\%%(title)s [%%(id)s].%%(ext)s" -a "%URL_LIST%"
+"D:\Toms Lab\.venv\Scripts\python.exe" -m yt_dlp --cookies-from-browser firefox --js-runtimes node --extractor-args "youtubepot-bgutilscript:script_path=%BGUTIL%" --format "bestaudio[ext=webm]/bestaudio/best" --no-overwrites --continue --ignore-errors --no-warnings --sleep-interval 20 --max-sleep-interval 50 --sleep-requests 1 --download-archive "%ARCHIVE%" -o "%TARGET_DIR%\%%(title)s [%%(id)s].%%(ext)s" -a "%URL_LIST%"
 
 set DONE=0
 for /f %%i in ('dir /b /a-d "%TARGET_DIR%\*.webm" 2^>nul ^| find /v /c ""') do set DONE=%%i
