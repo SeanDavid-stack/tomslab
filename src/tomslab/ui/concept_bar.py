@@ -39,8 +39,9 @@ TOP_N_DEFAULT = 12   # default number of chips shown (the rest are behind "Show 
 
 
 class ConceptChipBar(QWidget):
-    concept_clicked = pyqtSignal(str)     # left-click  → search/ask
-    evolution_requested = pyqtSignal(str)  # right-click → evolution timeline
+    concept_clicked = pyqtSignal(str)       # left-click   → search/ask
+    dashboard_requested = pyqtSignal(str)    # right-click  → concept dashboard
+    evolution_requested = pyqtSignal(str)    # right-click  → evolution timeline
 
     def __init__(self, conn: sqlite3.Connection, parent=None) -> None:
         super().__init__(parent)
@@ -158,13 +159,17 @@ class ConceptChipBar(QWidget):
         self.reload()
 
     def _show_context_menu(self, term: str) -> None:
-        """Right-click menu on a chip. One action — Show evolution — which
-        the host wires to open the EvolutionDialog via ``evolution_requested``."""
+        """Right-click menu on a chip. Two actions: dashboard (all sources
+        side-by-side) and evolution (time-grouped). Host wires each via
+        the matching signal."""
         from PyQt6.QtWidgets import QMenu
         menu = QMenu(self)
+        dash = menu.addAction(f"Show everything on {term}…")
         evo = menu.addAction(f"Show how Tom's framing of {term} evolved…")
         chosen = menu.exec(self.cursor().pos())
-        if chosen is evo:
+        if chosen is dash:
+            self.dashboard_requested.emit(term)
+        elif chosen is evo:
             self.evolution_requested.emit(term)
 
     def count(self) -> int:

@@ -317,6 +317,7 @@ class MainWindow(QMainWindow):
         self._concept_bar = ConceptChipBar(self._conn, self)
         self._concept_bar.concept_clicked.connect(self._on_concept_clicked)
         self._concept_bar.evolution_requested.connect(self._on_evolution_requested)
+        self._concept_bar.dashboard_requested.connect(self._on_dashboard_requested)
         outer.addWidget(self._concept_bar)
 
         # --- empty state hint ------------------------------------------
@@ -523,6 +524,18 @@ class MainWindow(QMainWindow):
         quarters of Discord + TomTube transcripts."""
         from tomslab.ui.evolution_dialog import EvolutionDialog
         dlg = EvolutionDialog(
+            self._conn,
+            term,
+            on_citation_clicked=self._jump_to_message_citation,
+            parent=self,
+        )
+        dlg.exec()
+
+    def _on_dashboard_requested(self, term: str) -> None:
+        """Right-click on a concept chip → single-page dashboard with
+        the top hits from each source type (PDFs / TomTube / Discord)."""
+        from tomslab.ui.concept_dashboard import ConceptDashboard
+        dlg = ConceptDashboard(
             self._conn,
             term,
             on_citation_clicked=self._jump_to_message_citation,
