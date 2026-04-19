@@ -884,11 +884,26 @@ def ingest_folder(
         added += 1
     conn.commit()
 
-    pending = conn.execute(
+    # Only count rows that actually have an audio file on disk. The
+    # DB may contain hundreds of 'pending' rows from a prior YouTube
+    # enumeration that never finished downloading — including those
+    # in the total would make the progress bar lie (e.g. '2/417' when
+    # only 180 files are actually present). Filter Python-side because
+    # SQLite can't os.path.exists().
+    raw_pending = conn.execute(
         "SELECT id, audio_path FROM videos "
         "WHERE transcript_status IN ('pending','downloaded','failed') "
         "ORDER BY added_at"
     ).fetchall()
+    pending = [r for r in raw_pending
+               if r["audio_path"] and Path(r["audio_path"]).exists()]
+    skipped_missing = len(raw_pending) - len(pending)
+    if skipped_missing:
+        log.info(
+            "folder-ingest: skipped %d pending row(s) with no audio file "
+            "on disk (likely from a prior YouTube enumeration that didn't "
+            "finish downloading).", skipped_missing,
+        )
     total = len(pending)
 
     done = 0
