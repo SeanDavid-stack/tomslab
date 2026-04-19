@@ -1356,13 +1356,18 @@ class MainWindow(QMainWindow):
     # ---- Folder-based video import (reliable path) --------------------
     def _on_import_video_folder(self) -> None:
         """User picks a folder of pre-downloaded audio/video files. We
-        scan, upsert rows, then transcribe + chunk each one."""
+        scan, upsert rows, then transcribe + chunk each one.
+
+        The scan runs on a background QThread so the UI stays responsive
+        even on huge folders / misclicks on D:\\ root."""
         if self._video_worker is not None and self._video_worker.isRunning():
             QMessageBox.information(self, "Already running",
                                     "A video ingest is already in progress.")
             return
 
-        from PyQt6.QtWidgets import QFileDialog
+        from PyQt6.QtWidgets import QFileDialog, QProgressDialog
+        from PyQt6.QtCore import QThread, pyqtSignal
+
         last = dbmod.get_setting(self._conn, "video_import_folder", "") or ""
         folder = QFileDialog.getExistingDirectory(
             self, "Select folder with Tom's video files", last,
@@ -1372,11 +1377,52 @@ class MainWindow(QMainWindow):
 
         from pathlib import Path
         from tomslab.ingest.youtube import scan_folder_for_videos
-        try:
-            candidates = scan_folder_for_videos(Path(folder))
-        except Exception as exc:
-            QMessageBox.critical(self, "Scan failed",
-                                 f"{type(exc).__name__}: {exc}")
+
+        # Background scan with a modal "Scanning…" progress dialog. The
+        # user can hit Cancel if they picked the wrong folder and don't
+        # want to wait the full rglob walk.
+        class _ScanWorker(QThread):
+            done = pyqtSignal(object, str)   # (candidates or None, error-message or '')
+
+            def __init__(self, path: Path, parent=None):
+                super().__init__(parent)
+                self._path = path
+
+            def run(self):
+                try:
+                    res = scan_folder_for_videos(self._path)
+                    self.done.emit(res, "")
+                except Exception as exc:
+                    self.done.emit(None, f"{type(exc).__name__}: {exc}")
+
+        prog = QProgressDialog(
+            f"Scanning {folder} for audio/video files…",
+            "Cancel", 0, 0, self,
+        )
+        prog.setWindowTitle("Scanning folder")
+        prog.setMinimumDuration(0)
+        prog.setAutoClose(True)
+
+        result_box: dict = {}
+
+        def _on_done(candidates, err):
+            result_box["candidates"] = candidates
+            result_box["err"] = err
+            prog.close()
+
+        scan = _ScanWorker(Path(folder), self)
+        scan.done.connect(_on_done)
+        scan.start()
+        prog.exec()   # blocks, but UI event loop keeps running
+        if result_box.get("candidates") is None and not result_box.get("err"):
+            # User hit Cancel in the progress dialog.
+            scan.terminate()
+            return
+
+        candidates = result_box.get("candidates")
+        err = result_box.get("err") or ""
+        if err:
+            QMessageBox.critical(self, "Scan failed", err)
             return
         if not candidates:
             QMessageBox.warning(

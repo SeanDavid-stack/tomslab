@@ -729,11 +729,30 @@ def _probe_duration_sec(path: Path) -> int:
     return 0
 
 
-def scan_folder_for_videos(folder: Path) -> list[dict]:
+def scan_folder_for_videos(
+    folder: Path,
+    *,
+    max_entries_visited: int = 20000,
+) -> list[dict]:
     """Walk `folder` looking for audio/video files and return a list of
-    candidate video rows ready for upsert. Does not touch the DB."""
+    candidate video rows ready for upsert. Does not touch the DB.
+
+    Safety: aborts with a clear error after walking `max_entries_visited`
+    entries without finding audio/video — this catches the 'user picked
+    D:\\ instead of D:\\Tom Videos' mistake where rglob could otherwise
+    churn through the entire drive and hang the UI.
+    """
     out: list[dict] = []
+    visited = 0
     for p in sorted(folder.rglob("*")):
+        visited += 1
+        if visited > max_entries_visited and not out:
+            raise RuntimeError(
+                f"Scanned {visited:,} entries in {folder} without finding "
+                f"any audio or video files. Did you pick the wrong folder? "
+                f"Navigate INTO the folder containing the .webm / .mp4 / "
+                f".mp3 files and click Select there."
+            )
         if not p.is_file():
             continue
         if p.suffix.lower() not in _AUDIO_VIDEO_EXTS:
