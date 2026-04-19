@@ -448,6 +448,7 @@ class ChatView(QWidget):
     def _render_assistant(self, text: str) -> str:
         labels = self._resolve_citation_labels(text)
         body = self._linkify_citations(text, labels)
+        sources_panel = self._sources_panel_html(text, labels)
         avatar = self._avatar_html("T", COLOR_AUTHOR_TOM)
         # Each assistant turn gets a "Save answer" link in its footer —
         # encodes the index in history so _on_anchor_clicked can look up
@@ -467,8 +468,67 @@ class ChatView(QWidget):
             f' background: {COLOR_BG_ALT}; border-left: 3px solid {COLOR_AUTHOR_TOM};'
             f' border-radius: 8px; color: {COLOR_TEXT}; white-space: pre-wrap;'
             f' line-height: 1.55;">{body}</div>'
+            f'{sources_panel}'
             f'{save_footer}'
             '</div>'
+        )
+
+    def _sources_panel_html(self, text: str, labels: dict[str, str]) -> str:
+        """Grouped 'Sources' panel under the answer body — one row per
+        source type (💬 Discord / 📄 PDFs / ▶ TomTube) with deduplicated
+        clickable chips. Mirrors the inline citation colors so the group
+        lines up visually with its inline pills."""
+        # Bucket + dedupe citations in order of first appearance.
+        buckets: dict[str, list[str]] = {"msg": [], "doc": [], "vid": []}
+        seen: dict[str, set[str]] = {"msg": set(), "doc": set(), "vid": set()}
+        for m in CITATION_RE.finditer(text or ""):
+            kind, raw = m.group(1), m.group(2)
+            if kind not in buckets:
+                continue
+            if raw in seen[kind]:
+                continue
+            seen[kind].add(raw)
+            buckets[kind].append(raw)
+
+        if not any(buckets.values()):
+            return ""
+
+        rows: list[str] = []
+        for kind, heading, emoji in (
+            ("msg", "Discord", "💬"),
+            ("doc", "PDFs",    "📄"),
+            ("vid", "TomTube", "▶"),
+        ):
+            if not buckets[kind]:
+                continue
+            style = self._PILL_STYLES[kind]
+            chips = []
+            for raw in buckets[kind]:
+                href = f"{kind}:{raw}"
+                friendly = labels.get(href) or {"msg": "msg", "doc": "doc",
+                                                "vid": "▶ video"}[kind]
+                chips.append(
+                    f'<a href="{html.escape(href)}" '
+                    f'style="color: {style["fg"]}; text-decoration: none; '
+                    f'background: {style["bg"]}; padding: 2px 8px;'
+                    f' border-radius: 4px; margin-right: 6px; font-size: 11px;'
+                    f' font-weight: 500;">{html.escape(friendly)}</a>'
+                )
+            rows.append(
+                f'<div style="margin: 4px 0; font-size: 11px;">'
+                f'<span style="color: {COLOR_DIM}; margin-right: 8px;">'
+                f'{emoji} <b>{heading}</b></span>'
+                f'{"".join(chips)}</div>'
+            )
+
+        return (
+            f'<div style="margin-left: 38px; margin-top: 8px; padding: 8px 12px;'
+            f' background: rgba(0,0,0,0.18); border-radius: 6px;">'
+            f'<div style="color: {COLOR_DIM}; font-size: 10px; '
+            f'text-transform: uppercase; letter-spacing: 0.5px; '
+            f'margin-bottom: 4px;">Sources</div>'
+            f'{"".join(rows)}'
+            f'</div>'
         )
 
     # Per-source pill styling so Discord, PDF, and YouTube citations are
