@@ -103,7 +103,10 @@ class MainWindow(QMainWindow):
         self._delegate = MessageDelegate(self)
         self._delegate.thumbnail_clicked.connect(self._open_image_viewer)
         self._delegate.bookmark_toggled.connect(self._on_bookmark_toggled)
+        self._delegate.avatar_right_clicked.connect(self._on_avatar_right_clicked)
         self._delegate.set_bookmarks(bmmod.all_message_ids(self._conn))
+        from tomslab import favorites as favmod
+        self._delegate.set_favorite_names(favmod.favorite_name_set(self._conn))
         self._worker: ImportWorker | None = None
         self._embed_worker: EmbedWorker | None = None
         self._image_embed_worker: ImageEmbedWorker | None = None
@@ -713,6 +716,31 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # bookmarks
     # ------------------------------------------------------------------
+    def _on_avatar_right_clicked(self, author_name: str,
+                                 author_nickname: str, global_pt) -> None:
+        """Right-click an avatar in the Feed → context menu for this
+        author: filter feed to them, save/unsave as favorite."""
+        from PyQt6.QtWidgets import QMenu
+        from tomslab import favorites as favmod
+        is_fav = favmod.is_favorite(self._conn, author_name)
+        menu = QMenu(self)
+        act_filter = menu.addAction(f"Filter feed to @{author_nickname}")
+        if is_fav:
+            act_fav = menu.addAction(f"✖  Remove {author_nickname} from favorites")
+        else:
+            act_fav = menu.addAction(f"★  Save {author_nickname} as favorite")
+        chosen = menu.exec(global_pt)
+        if chosen is act_filter:
+            self._search.setText(f"@{author_name}")
+            self._apply_search()
+        elif chosen is act_fav:
+            if is_fav:
+                favmod.remove_favorite(self._conn, author_name)
+            else:
+                favmod.add_favorite(self._conn, author_name, author_nickname)
+            self._delegate.set_favorite_names(favmod.favorite_name_set(self._conn))
+            self._list.viewport().update()
+
     def _on_bookmark_toggled(self, message_id: str, now_on: bool) -> None:
         bmmod.toggle_message(self._conn, message_id)
         self._delegate.set_bookmarks(bmmod.all_message_ids(self._conn))

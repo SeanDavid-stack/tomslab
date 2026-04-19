@@ -97,6 +97,8 @@ class MessageDelegate(QStyledItemDelegate):
     # Emitted when a user clicks a chart thumbnail in a feed row.
     thumbnail_clicked = pyqtSignal(str)   # absolute local path
     bookmark_toggled = pyqtSignal(str, bool)   # (message_id, is_now_bookmarked)
+    # (author_name, author_nickname) — right-click an avatar for menu
+    avatar_right_clicked = pyqtSignal(str, str, QPoint)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -104,6 +106,8 @@ class MessageDelegate(QStyledItemDelegate):
         self._last_width: int = -1
         self._row_thumb_rects: dict[int, list[tuple[QRect, str]]] = {}
         self._row_star_rects: dict[int, QRect] = {}   # click target for bookmark
+        self._row_avatar_rects: dict[int, QRect] = {}   # click target for avatar
+        self._favorite_names: set[str] = set()   # author_names marked ★
         # Flash-on-jump state: when MainWindow navigates to a row we paint a
         # gold overlay for a short window, then it fades out.
         self._flash_row_id: str | None = None   # message id to flash
@@ -205,6 +209,23 @@ class MessageDelegate(QStyledItemDelegate):
         av_x = rect.x() + PAD_X
         av_y = rect.y() + PAD_Y
         _paint_avatar(painter, av_x, av_y, msg)
+        # Record avatar hitbox for right-click context menu.
+        self._row_avatar_rects[index.row()] = QRect(
+            av_x, av_y, AVATAR_SIZE, AVATAR_SIZE
+        )
+        # ★ badge on favorites' avatars — small gold star in top-right
+        # corner, rendered on top of the avatar circle.
+        if msg.author_name in self._favorite_names and not is_doc:
+            star_x = av_x + AVATAR_SIZE - 11
+            star_y = av_y - 3
+            painter.save()
+            painter.setPen(QPen(COLOR_GOLD))
+            fav_font = QFont(painter.font())
+            fav_font.setPointSizeF(11.0)
+            fav_font.setBold(True)
+            painter.setFont(fav_font)
+            painter.drawText(star_x, star_y + 10, "★")
+            painter.restore()
 
         # --- layout ------------------------------------------------------
         x = av_x + AVATAR_SIZE + AVATAR_GAP
@@ -293,30 +314,48 @@ class MessageDelegate(QStyledItemDelegate):
     # mouse handling — detect clicks on thumbnail / star rects
     # ------------------------------------------------------------------
     def editorEvent(self, event, model, option, index) -> bool:
-        if (
-            isinstance(event, QMouseEvent)
-            and event.type() == QMouseEvent.Type.MouseButtonRelease
-            and event.button() == Qt.MouseButton.LeftButton
-        ):
+        if isinstance(event, QMouseEvent):
             pt = event.position().toPoint()
-            # Star takes priority so it's clickable even over any overlap.
-            star_rect = self._row_star_rects.get(index.row())
-            if star_rect and star_rect.isValid() and star_rect.contains(pt):
-                msg: MessageRow | None = index.data(ROLE_MESSAGE)
-                if msg and msg.id and msg.doc_meta is None:
-                    now_on = msg.id not in self._bookmarked
-                    if now_on:
-                        self._bookmarked.add(msg.id)
-                    else:
-                        self._bookmarked.discard(msg.id)
-                    self.bookmark_toggled.emit(msg.id, now_on)
-                    return True
-            rects = self._row_thumb_rects.get(index.row()) or []
-            for rect, path in rects:
-                if rect.contains(pt):
-                    self.thumbnail_clicked.emit(path)
-                    return True
+            # Right-click an avatar → author context menu. Takes priority
+            # over left-click handling below.
+            if (event.type() == QMouseEvent.Type.MouseButtonRelease
+                    and event.button() == Qt.MouseButton.RightButton):
+                av_rect = self._row_avatar_rects.get(index.row())
+                if av_rect and av_rect.isValid() and av_rect.contains(pt):
+                    msg: MessageRow | None = index.data(ROLE_MESSAGE)
+                    if msg and msg.author_name and msg.doc_meta is None:
+                        # Emit in global coords so the receiver can
+                        # position a QMenu at the click site.
+                        global_pt = event.globalPosition().toPoint()
+                        self.avatar_right_clicked.emit(
+                            msg.author_name,
+                            (msg.author_nickname or msg.author_name),
+                            global_pt,
+                        )
+                        return True
+            if (event.type() == QMouseEvent.Type.MouseButtonRelease
+                    and event.button() == Qt.MouseButton.LeftButton):
+                # Star takes priority so it's clickable even over any overlap.
+                star_rect = self._row_star_rects.get(index.row())
+                if star_rect and star_rect.isValid() and star_rect.contains(pt):
+                    msg = index.data(ROLE_MESSAGE)
+                    if msg and msg.id and msg.doc_meta is None:
+                        now_on = msg.id not in self._bookmarked
+                        if now_on:
+                            self._bookmarked.add(msg.id)
+                        else:
+                            self._bookmarked.discard(msg.id)
+                        self.bookmark_toggled.emit(msg.id, now_on)
+                        return True
+                rects = self._row_thumb_rects.get(index.row()) or []
+                for rect, path in rects:
+                    if rect.contains(pt):
+                        self.thumbnail_clicked.emit(path)
+                        return True
         return super().editorEvent(event, model, option, index)
+
+    def set_favorite_names(self, names: set[str]) -> None:
+        self._favorite_names = set(names or ())
 
 
 # -----------------------------------------------------------------------------

@@ -229,6 +229,15 @@ CREATE TABLE IF NOT EXISTS video_chunk_embeddings (
 );
 CREATE INDEX IF NOT EXISTS idx_video_chunk_embed_model ON video_chunk_embeddings(model);
 
+-- ---- favorite authors -----------------------------------------------------
+-- User-curated list of high-signal traders. The key is author_name (the
+-- stable Discord handle), with author_nickname cached for display.
+CREATE TABLE IF NOT EXISTS favorite_authors (
+    author_name TEXT PRIMARY KEY,
+    author_nickname TEXT,
+    added_at TEXT
+);
+
 -- ---- imports log (so we can resume / show history) -------------------------
 CREATE TABLE IF NOT EXISTS imports (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
