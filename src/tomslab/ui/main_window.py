@@ -380,7 +380,7 @@ class MainWindow(QMainWindow):
 
         self._search = QLineEdit()
         self._search.setPlaceholderText(
-            "Search messages (keyword) — e.g. VPOC absorption, overnight inventory…"
+            "Search messages — e.g. VPOC absorption · prefix author with @ (@alice volume profile)"
         )
         self._search.setClearButtonEnabled(True)
         self._search.textChanged.connect(self._on_search_text_changed)

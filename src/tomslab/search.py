@@ -34,6 +34,12 @@ def build_fts_query(user_text: str) -> str:
     Tokens are AND'd together implicitly (FTS5 default).  Quoted phrases
     in the user's input are preserved; bare tokens become prefix matches
     (trailing ``*``) so typing ``absorpt`` finds ``absorption``.
+
+    **Author filter syntax.** Tokens starting with ``@`` are treated as
+    author filters: ``@alice`` becomes a column-specific FTS5 match
+    against author_name + author_nickname. So ``@alice volume profile``
+    returns alice's posts mentioning "volume profile", not posts
+    containing the literal word "alice".
     """
     text = (user_text or "").strip()
     if not text:
@@ -42,8 +48,17 @@ def build_fts_query(user_text: str) -> str:
     pieces: list[str] = []
     for m in _TOKEN_RE.finditer(text):
         tok = m.group(0)
+        # --- author filter: @name ---------------------------------------
+        if tok.startswith("@") and len(tok) > 1:
+            name = tok[1:].strip('"').replace('"', '""')
+            if name:
+                # FTS5 column-specific match. Parentheses group the OR.
+                pieces.append(
+                    f'({{author_name author_nickname}}: "{name}"*)'
+                )
+            continue
+        # --- content --------------------------------------------------
         if tok.startswith('"') and tok.endswith('"') and len(tok) >= 2:
-            # already quoted: keep as phrase, escape internal quotes
             inner = tok[1:-1].replace('"', '""')
             if inner:
                 pieces.append(f'"{inner}"')
