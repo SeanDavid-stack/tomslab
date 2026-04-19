@@ -178,15 +178,21 @@ class MessageDelegate(QStyledItemDelegate):
 
         rect: QRect = option.rect
         # --- background --------------------------------------------------
+        # Selection shades the row's *own* accent color rather than
+        # blanketing everything in gray — so a selected Tom card still
+        # reads as Tom (gold family, slightly darker), a selected doc
+        # still reads as a doc, etc. Previously every selected row
+        # collapsed to the hover gray which made Tom's cards look like
+        # ordinary user messages the moment you clicked them.
         is_doc = msg.doc_meta is not None
-        if option.state & QStyle.StateFlag.State_Selected:
-            bg = COLOR_BG_HOVER.darker(110)
-        elif is_doc:
-            bg = COLOR_BG_DOC
+        is_selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        if is_doc:
+            base = COLOR_BG_DOC
         elif msg.is_featured_speaker:
-            bg = COLOR_BG_GOLD
+            base = COLOR_BG_GOLD
         else:
-            bg = COLOR_BG_NORMAL
+            base = COLOR_BG_NORMAL
+        bg = base.darker(115) if is_selected else base
         painter.fillRect(rect, bg)
 
         # left accent bar: gold for Tom Discord, blue for doc pages, none otherwise.
