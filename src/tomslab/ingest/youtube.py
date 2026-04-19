@@ -27,25 +27,62 @@ from tomslab.paths import data_dir
 
 log = logging.getLogger(__name__)
 
-try:
-    import yt_dlp
-except ImportError:  # pragma: no cover
-    yt_dlp = None
+# Heavy third-party deps are imported lazily. `faster_whisper` transitively
+# loads torch, and on some systems (antivirus scan, DLL loader deadlock,
+# CUDA driver in a bad state) `import torch` hangs indefinitely. Doing
+# it at module top level meant the first `from tomslab.ingest.youtube
+# import …` call inside the UI froze the app. Lazy import defers the
+# pain until a function that actually needs it is called, so Tom's Lab
+# can still scan folders, show the picker, etc., even if transcription
+# can't start.
+yt_dlp = None           # type: ignore[assignment]
+imageio_ffmpeg = None   # type: ignore[assignment]
+WhisperModel = None     # type: ignore[assignment]
+_PTFYouTube = None      # type: ignore[assignment]
 
-try:
-    import imageio_ffmpeg
-except ImportError:  # pragma: no cover
-    imageio_ffmpeg = None
 
-try:
-    from faster_whisper import WhisperModel
-except ImportError:  # pragma: no cover
-    WhisperModel = None
+def _ensure_yt_dlp():
+    global yt_dlp
+    if yt_dlp is None:
+        try:
+            import yt_dlp as _m
+            yt_dlp = _m
+        except ImportError:
+            yt_dlp = None
+    return yt_dlp
 
-try:
-    from pytubefix import YouTube as _PTFYouTube
-except ImportError:  # pragma: no cover
-    _PTFYouTube = None
+
+def _ensure_imageio_ffmpeg():
+    global imageio_ffmpeg
+    if imageio_ffmpeg is None:
+        try:
+            import imageio_ffmpeg as _m
+            imageio_ffmpeg = _m
+        except ImportError:
+            imageio_ffmpeg = None
+    return imageio_ffmpeg
+
+
+def _ensure_whisper():
+    global WhisperModel
+    if WhisperModel is None:
+        try:
+            from faster_whisper import WhisperModel as _W
+            WhisperModel = _W   # type: ignore[assignment]
+        except ImportError:
+            WhisperModel = None
+    return WhisperModel
+
+
+def _ensure_pytubefix():
+    global _PTFYouTube
+    if _PTFYouTube is None:
+        try:
+            from pytubefix import YouTube as _Y
+            _PTFYouTube = _Y   # type: ignore[assignment]
+        except ImportError:
+            _PTFYouTube = None
+    return _PTFYouTube
 
 
 ProgressFn = Callable[[str, int, int], None]   # (stage, current, total)
@@ -110,9 +147,10 @@ def is_signed_in() -> bool:
 
 
 def _ffmpeg_path() -> str:
-    if imageio_ffmpeg is None:
+    mod = _ensure_imageio_ffmpeg()
+    if mod is None:
         return "ffmpeg"
-    return imageio_ffmpeg.get_ffmpeg_exe()
+    return mod.get_ffmpeg_exe()
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +179,8 @@ def _channel_root(channel_url: str) -> str:
 
 def _enumerate_one(url: str, limit: int | None) -> tuple[list[dict], str]:
     """Single yt-dlp walk. Returns (entries, channel_display_name)."""
-    if yt_dlp is None:
+    mod = _ensure_yt_dlp()
+    if mod is None:
         raise RuntimeError("yt-dlp not installed")
     opts = {
         "quiet": True,
@@ -153,7 +192,7 @@ def _enumerate_one(url: str, limit: int | None) -> tuple[list[dict], str]:
         opts["playlistend"] = int(limit)
     log.info("Enumerating %s", url)
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
+        with mod.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
     except Exception as exc:
         log.warning("enumerate %s failed: %s", url, exc)
@@ -489,13 +528,14 @@ def _load_whisper(model_name: str = "large-v3") -> "WhisperModel":
     global _whisper
     if _whisper is not None:
         return _whisper
-    if WhisperModel is None:
+    W = _ensure_whisper()
+    if W is None:
         raise RuntimeError("faster-whisper not installed")
     log.info("Probing CUDA availability (with timeout)…")
     device = _detect_device_with_timeout()
     compute = "float16" if device == "cuda" else "int8"
     log.info("Loading faster-whisper %s on %s (%s)", model_name, device, compute)
-    _whisper = WhisperModel(model_name, device=device, compute_type=compute)
+    _whisper = W(model_name, device=device, compute_type=compute)
     return _whisper
 
 
