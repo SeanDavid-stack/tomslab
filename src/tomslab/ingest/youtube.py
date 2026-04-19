@@ -64,23 +64,49 @@ def audio_path_for(video_id: str) -> Path:
     return videos_dir() / f"{video_id}.mp3"
 
 
-def youtube_token_path() -> Path:
-    """Where pytubefix's OAuth token cache lives. A single file shared by
-    all ingest workers in the app."""
-    return data_dir() / "youtube_oauth_tokens.json"
-
-
-def is_signed_in() -> bool:
-    """True if a usable OAuth token cache exists."""
-    p = youtube_token_path()
-    try:
-        return p.exists() and p.stat().st_size > 20
-    except OSError:
-        return False
+# File extensions the folder-ingest scanner treats as audio sources.
+# Defined early so download_audio() below can also consult it when
+# resolving an existing download.
+_AUDIO_VIDEO_EXTS = (".mp3", ".m4a", ".opus", ".aac", ".wav", ".flac",
+                     ".mp4", ".webm", ".mkv", ".mov")
 
 
 class YouTubeNotSignedInError(RuntimeError):
-    """Raised when ingest is attempted without a cached OAuth token."""
+    """Raised when ingest is attempted but the auth pre-flight fails.
+
+    Kept under the old name for wire-compatibility with the UI; the
+    actual requirement is now "Firefox signed into YouTube + Node.js on
+    PATH + bgutil PO-token script installed" rather than an OAuth token
+    file.
+    """
+
+
+def is_signed_in() -> bool:
+    """True if the full yt-dlp pipeline is ready: Firefox profile is
+    accessible, Node.js is on PATH, and the bgutil script is present.
+
+    Checks all three because yt-dlp will silently fall back to an
+    unauthenticated client path (android_vr) if any of them is missing,
+    and YouTube then rejects every video. Failing fast is friendlier.
+    """
+    import shutil
+    if shutil.which("node") is None:
+        return False
+    # Cheap existence check for the bgutil script in its usual locations.
+    for loc in (
+        Path.home() / "bgutil-ytdlp-pot-provider" / "server" / "build" / "generate_once.js",
+        Path(r"C:\Users\seane\bgutil-ytdlp-pot-provider\server\build\generate_once.js"),
+        data_dir() / "bgutil-ytdlp-pot-provider" / "server" / "build" / "generate_once.js",
+    ):
+        if loc.is_file():
+            break
+    else:
+        return False
+    # Firefox cookies get read by yt-dlp at download time; we can't cheaply
+    # validate them without a network round-trip. Treat the other two
+    # checks as sufficient — yt-dlp will surface a clear error if cookies
+    # are missing/stale at runtime.
+    return True
 
 
 def _ffmpeg_path() -> str:
@@ -259,15 +285,45 @@ def upsert_video_rows(conn: sqlite3.Connection, entries: list[VideoEntry]) -> in
 
 
 # ---------------------------------------------------------------------------
-# audio download (pytubefix + OAuth)
+# audio download (yt-dlp + Firefox cookies + Node bgutil script)
 # ---------------------------------------------------------------------------
-# Why pytubefix instead of yt-dlp: YouTube's 2026 bot-gate (n-challenge +
-# PO tokens) locked out yt-dlp's anonymous and cookie-based paths for this
-# channel. pytubefix supports Google's OAuth device flow, which signs in
-# once with the user's account, caches a long-lived refresh token, and is
-# treated as a first-class authenticated session by YouTube — fully
-# bypassing the bot gate. The token file lives at ``youtube_token_path()``
-# and is written on first sign-in via the UI's "Sign in to YouTube" action.
+# Pipeline we confirmed works against YouTube's 2026 bot-gate:
+#
+#   1. `--cookies-from-browser firefox` — signed-in session cookies
+#   2. `--js-runtimes node`             — Node.js solves the n-challenge
+#   3. `--extractor-args youtubepot-bgutilscript:script_path=<js>`
+#                                        — bgutil Node.js script mints PO tokens
+#
+# All three are required. Removing any single one causes yt-dlp to fall
+# back to the android_vr client, which YouTube then rejects with
+# "Sign in to confirm you're not a bot". The sleep-interval flags keep us
+# under YouTube's session rate-limit (~20-50s per request is safe).
+
+
+def _bgutil_script_path() -> Path:
+    """Locate the bgutil-ytdlp-pot-provider Node script. Searches the
+    standard install locations; raises if not found."""
+    candidates = [
+        Path.home() / "bgutil-ytdlp-pot-provider" / "server" / "build" / "generate_once.js",
+        Path(r"C:\Users\seane\bgutil-ytdlp-pot-provider\server\build\generate_once.js"),
+        data_dir() / "bgutil-ytdlp-pot-provider" / "server" / "build" / "generate_once.js",
+    ]
+    for c in candidates:
+        if c.is_file():
+            return c
+    raise YouTubeNotSignedInError(
+        "bgutil PO-token script not found. Clone and build "
+        "https://github.com/Brainicism/bgutil-ytdlp-pot-provider into "
+        "your home directory before using direct YouTube import."
+    )
+
+
+def _node_on_path() -> bool:
+    """True if `node` is resolvable on PATH (required for the JS runtime
+    and the bgutil script)."""
+    import shutil
+    return shutil.which("node") is not None
+
 
 def _convert_to_mp3(src: Path, bitrate_kbps: int) -> Path:
     """Run ffmpeg to strip video + transcode to low-bitrate MP3.
@@ -285,57 +341,64 @@ def _convert_to_mp3(src: Path, bitrate_kbps: int) -> Path:
 
 
 def download_audio(video_id: str, bitrate_kbps: int = 96) -> Path:
-    """Download a single video's audio as a low-bitrate MP3 into videos_dir.
+    """Download a single video's audio via yt-dlp subprocess.
 
-    Uses pytubefix with a cached OAuth token. Call ``is_signed_in()`` first
-    in the UI flow; if it returns False, route the user through the
-    "Sign in to YouTube" menu action before attempting any ingest.
+    Saves the native audio stream (.webm/Opus, ~70MB per 80-min video) so
+    we don't need a working ffprobe. Tom's Lab's faster-whisper pipeline
+    reads .webm directly, and the folder-import path does the same.
 
-    Resumable — if the target MP3 already exists and is non-empty, returns
-    it unchanged without touching the network.
+    Resumable: if a non-empty file for this video_id already exists in
+    any supported audio extension, returns that path immediately.
     """
-    if _PTFYouTube is None:
-        raise RuntimeError("pytubefix not installed")
-    out = audio_path_for(video_id)
-    if out.exists() and out.stat().st_size > 1024:
-        return out
-    if not is_signed_in():
+    for ext in (".webm", ".m4a", ".opus", ".mp3"):
+        existing = videos_dir() / f"{video_id}{ext}"
+        if existing.exists() and existing.stat().st_size > 1024:
+            return existing
+
+    if not _node_on_path():
         raise YouTubeNotSignedInError(
-            "No YouTube OAuth token cached. Use File → Sign in to YouTube "
-            "(one-time) before starting an ingest."
+            "Node.js not found on PATH. Install Node.js (≥20) before "
+            "using direct YouTube import."
         )
+    bgutil = _bgutil_script_path()    # raises if missing
 
+    import subprocess
     url = f"https://www.youtube.com/watch?v={video_id}"
-    log.info("Downloading audio for %s (pytubefix/oauth)", video_id)
-    try:
-        yt = _PTFYouTube(
-            url,
-            use_oauth=True,
-            allow_oauth_cache=True,
-            token_file=str(youtube_token_path()),
-        )
-        stream = (
-            yt.streams
-              .filter(only_audio=True)
-              .order_by("abr")
-              .desc()
-              .first()
-        )
-        if stream is None:
-            raise RuntimeError(
-                f"no audio stream available for {video_id} (video may be "
-                f"members-only, geo-blocked, or deleted)"
-            )
-        raw = Path(stream.download(
-            output_path=str(videos_dir()),
-            filename=f"{video_id}.{stream.subtype}",
-        ))
-    except Exception as exc:
-        raise RuntimeError(f"pytubefix download failed for {video_id}: {exc}") from exc
+    out_template = str(videos_dir() / f"{video_id}.%(ext)s")
+    log.info("Downloading audio for %s (yt-dlp/firefox+bgutil)", video_id)
 
-    if raw.suffix.lower() == ".mp3":
-        return raw
-    return _convert_to_mp3(raw, bitrate_kbps)
+    cmd = [
+        "python", "-m", "yt_dlp",
+        "--cookies-from-browser", "firefox",
+        "--js-runtimes", "node",
+        "--extractor-args", f"youtubepot-bgutilscript:script_path={bgutil}",
+        "--format", "bestaudio[ext=webm]/bestaudio/best",
+        "--no-overwrites", "--continue",
+        "--no-warnings",
+        "--sleep-interval", "20", "--max-sleep-interval", "50",
+        "--sleep-requests", "1",
+        "-o", out_template,
+        url,
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    if proc.returncode != 0:
+        msg = (proc.stderr or proc.stdout or "").strip().splitlines()
+        tail = "\n".join(msg[-8:]) if msg else "(no output)"
+        if "Sign in to confirm" in tail or "not a bot" in tail:
+            raise YouTubeNotSignedInError(
+                "YouTube rejected the request as unauthenticated. Open "
+                "Firefox, confirm you're signed into youtube.com, then "
+                "retry. If this persists, YouTube rate-limited the IP — "
+                "wait ~60 minutes."
+            )
+        raise RuntimeError(f"yt-dlp failed for {video_id}: {tail}")
+
+    # Find whatever it produced. yt-dlp names it video_id.ext.
+    for p in videos_dir().glob(f"{video_id}.*"):
+        if p.is_file() and p.suffix.lower() in _AUDIO_VIDEO_EXTS:
+            if p.stat().st_size > 1024:
+                return p
+    raise RuntimeError(f"yt-dlp ran but produced no output for {video_id}")
 
 
 # ---------------------------------------------------------------------------
@@ -571,9 +634,8 @@ def ingest_channel(
 # folder, then ingest from there. Filenames from most tools embed the
 # 11-char YouTube ID in brackets or after a dash; we parse it out so
 # citations still link to the canonical URL + timestamp.
-
-_AUDIO_VIDEO_EXTS = (".mp3", ".m4a", ".opus", ".aac", ".wav", ".flac",
-                     ".mp4", ".webm", ".mkv", ".mov")
+# (_AUDIO_VIDEO_EXTS is defined near the top of this module so the
+# download path can also consult it.)
 
 # 4K Video Downloader:    "Title [VIDEO_ID].mp3"
 # yt-dlp default:          "Title-VIDEO_ID.ext" or "Title [VIDEO_ID].ext"

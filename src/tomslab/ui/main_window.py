@@ -159,7 +159,7 @@ class MainWindow(QMainWindow):
         self._import_folder_action.triggered.connect(self._on_import_video_folder)
         file_menu.addAction(self._import_folder_action)
 
-        self._signin_youtube_action = QAction("&Sign in to YouTube (one-time)…", self)
+        self._signin_youtube_action = QAction("Check TomTube &direct-download setup…", self)
         self._signin_youtube_action.triggered.connect(self._on_signin_youtube)
         file_menu.addAction(self._signin_youtube_action)
 
@@ -939,33 +939,62 @@ class MainWindow(QMainWindow):
         self._on_ingest_youtube_start(f"{len(new)} new video(s)")
 
     def _on_signin_youtube(self) -> None:
-        from tomslab.ui.youtube_oauth import run_oauth_flow
-        ok = run_oauth_flow(self)
-        if ok:
-            QMessageBox.information(
-                self, "Signed in",
-                "YouTube sign-in complete. You can now use "
-                "File → Import YouTube (TomTube)…",
-            )
+        """Run the TomTube direct-download setup check + show a verbose
+        dialog explaining the fragility."""
+        import shutil
+        from pathlib import Path
+        from tomslab.paths import data_dir
+
+        node_ok = shutil.which("node") is not None
+        bgutil_locations = [
+            Path.home() / "bgutil-ytdlp-pot-provider" / "server" / "build" / "generate_once.js",
+            Path(r"C:\Users\seane\bgutil-ytdlp-pot-provider\server\build\generate_once.js"),
+            data_dir() / "bgutil-ytdlp-pot-provider" / "server" / "build" / "generate_once.js",
+        ]
+        bgutil_ok = any(p.is_file() for p in bgutil_locations)
+
+        def _row(name: str, ok: bool, detail: str = "") -> str:
+            icon = "✅" if ok else "❌"
+            tail = f" — <i>{detail}</i>" if detail else ""
+            return f"<li>{icon} <b>{name}</b>{tail}</li>"
+
+        body = (
+            "<h3>TomTube direct-download setup</h3>"
+            "<ul>"
+            f"{_row('Node.js on PATH', node_ok, 'solves YouTube JS challenge')}"
+            f"{_row('bgutil PO-token script', bgutil_ok, 'mints proof-of-origin tokens')}"
+            "<li>❓ <b>Firefox signed into YouTube</b> — "
+            "<i>we can't check this without a network round-trip. "
+            "Open Firefox and confirm your avatar shows on youtube.com.</i></li>"
+            "</ul>"
+            "<p style='color:#b00020;'><b>⚠ This feature is fragile.</b> "
+            "YouTube actively fights third-party downloaders. The pipeline "
+            "relies on external tools (yt-dlp, Node.js, bgutil) that may "
+            "stop working any day when YouTube changes their anti-bot "
+            "system. I may or may not fix it promptly. If you need new "
+            "videos indexed and the in-app downloader is broken, download "
+            "them with whatever tool works at that moment (JDownloader, "
+            "4K Video Downloader, browser extensions) into a folder, then "
+            "use <b>File → Import videos from folder…</b> — that path is "
+            "library-agnostic and doesn't break.</p>"
+        )
+        QMessageBox.information(self, "TomTube setup", body)
 
     def _ensure_youtube_signed_in(self) -> bool:
-        """Gate TomTube ingest on a cached OAuth token. Returns True if the
-        caller should proceed."""
+        """Gate direct-YouTube ingest on the setup pre-flight. Returns True
+        if the caller should proceed."""
         from tomslab.ingest.youtube import is_signed_in
         if is_signed_in():
             return True
-        reply = QMessageBox.question(
+        QMessageBox.warning(
             self,
-            "Sign in to YouTube",
-            "TomTube needs a one-time YouTube sign-in before it can "
-            "download videos. Sign in now?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
+            "TomTube setup incomplete",
+            "The direct-YouTube downloader isn't ready. Use "
+            "<b>File → Check TomTube direct-download setup…</b> to see "
+            "what's missing, or use <b>File → Import videos from folder…</b> "
+            "to side-step the YouTube auth problem entirely.",
         )
-        if reply != QMessageBox.StandardButton.Yes:
-            return False
-        from tomslab.ui.youtube_oauth import run_oauth_flow
-        return run_oauth_flow(self)
+        return False
 
     def _on_ingest_youtube(self) -> None:
         if self._video_worker is not None and self._video_worker.isRunning():
@@ -976,21 +1005,28 @@ class MainWindow(QMainWindow):
             return
         reply = QMessageBox.question(
             self,
-            "Import YouTube (TomTube)",
+            "Import YouTube directly (experimental)",
             "<b>This will:</b>"
             "<ul>"
             "<li>Scrape the Bookmap YouTube channel for videos tagged 'Tom B'</li>"
-            "<li>Download each video's audio (~10–15 MB each at 96 kbps)</li>"
+            "<li>Download each video's audio (.webm / Opus, ~70 MB each)</li>"
             "<li>Transcribe locally with faster-whisper on your GPU (~10× realtime)</li>"
             "<li>Chunk the transcripts and embed them for Ask Tom</li>"
             "</ul>"
-            "<p>Uses your cached Google OAuth token to bypass YouTube's "
-            "bot gate. <b>Expect this to run for hours</b> — the pipeline "
-            "is resumable, so you can close the app and it picks up where "
-            "it left off next time.</p>"
-            "<p><b>Proceed?</b></p>",
+            "<p style='color:#b00020;'><b>⚠ Fragile feature — read this:</b> "
+            "This downloader fights YouTube's anti-bot system using a chain "
+            "of external tools (yt-dlp + Node.js + bgutil + Firefox cookies). "
+            "YouTube changes their defenses constantly and the pipeline can "
+            "break any day. When it breaks, it may stay broken until the "
+            "tooling catches up — which may never happen. "
+            "<b>If you need new videos indexed and this feature is down, "
+            "download them manually with any working tool (JDownloader, "
+            "4K Video Downloader, browser extensions) into a folder, then "
+            "use File → Import videos from folder — that path is "
+            "library-agnostic and doesn't break.</b></p>"
+            "<p><b>Proceed with the direct downloader anyway?</b></p>",
             QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Ok,
+            QMessageBox.StandardButton.Cancel,
         )
         if reply != QMessageBox.StandardButton.Ok:
             return
