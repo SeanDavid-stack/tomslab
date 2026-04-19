@@ -17,11 +17,14 @@ REM ============================================================
 
 set TARGET_DIR=D:\Tom Videos
 set URL_LIST=D:\Toms Lab\tom_video_urls_fresh.txt
+set REMAINING_LIST=D:\Tom Videos\_urls_remaining.txt
 set SHUFFLED_LIST=D:\Tom Videos\_urls_shuffled.txt
 set BGUTIL=C:\Users\seane\bgutil-ytdlp-pot-provider\server\build\generate_once.js
-REM Persistent ledger of finished videos (yt-dlp skips anything
-REM listed here BEFORE touching the network — cuts resume-pass
-REM YouTube hits from ~450 to zero on already-done items).
+REM Persistent ledger of finished videos. yt-dlp writes here as it
+REM finishes videos; we also pre-filter URL_LIST against it each pass
+REM so already-done videos never even appear in the list yt-dlp sees.
+REM That gives clean 'X of Y still to download' numbers and zero
+REM wasted YouTube hits on completed items.
 set ARCHIVE=D:\Tom Videos\_downloaded_ids.txt
 set PYEXE="D:\Toms Lab\.venv\Scripts\python.exe"
 
@@ -43,20 +46,33 @@ set /a ATTEMPT=0
 :retry_loop
 set /a ATTEMPT+=1
 echo ==========================================================
-echo   Pass #%ATTEMPT%  -  shuffling URL order, starting yt-dlp
+echo   Pass #%ATTEMPT%  -  computing remaining list, shuffling
 echo ==========================================================
 
-REM Shuffle the URL list so YouTube doesn't see the same sequential
-REM walk every pass. Fresh order = no 'this bot always hits videos in
-REM the same order' fingerprint.
-%PYEXE% -c "import random; lines = open(r'%URL_LIST%', encoding='utf-8').readlines(); random.shuffle(lines); open(r'%SHUFFLED_LIST%', 'w', encoding='utf-8').writelines(lines)"
+REM 1. Cross-check: build _urls_remaining.txt = URL_LIST minus any
+REM    video ids already recorded in the archive. Also rewrites
+REM    _urls_shuffled.txt with the same set in random order for yt-dlp.
+%PYEXE% -c "import random, re, os; done = set(); p = r'%ARCHIVE%'; open(p,'a',encoding='utf-8').close(); [done.add(l.split()[1]) for l in open(p,encoding='utf-8') if l.startswith('youtube ')]; lines = [l for l in open(r'%URL_LIST%',encoding='utf-8') if (m:=re.search(r'v=([A-Za-z0-9_-]{11})', l)) and m.group(1) not in done]; open(r'%REMAINING_LIST%','w',encoding='utf-8').writelines(lines); random.shuffle(lines); open(r'%SHUFFLED_LIST%','w',encoding='utf-8').writelines(lines); print(f'Cross-check: {len(done)} done in archive, {len(lines)} still to download.')"
+
+set REMAIN=0
+for /f %%i in ('type "%REMAINING_LIST%" 2^>nul ^| find /v /c ""') do set REMAIN=%%i
+if %REMAIN% EQU 0 (
+    echo.
+    echo ==========================================================
+    echo   Nothing left to download. Everything in the URL list is
+    echo   already recorded in the archive. Done.
+    echo ==========================================================
+    pause
+    exit /b 0
+)
 
 %PYEXE% -m yt_dlp --cookies-from-browser firefox --js-runtimes node --extractor-args "youtubepot-bgutilscript:script_path=%BGUTIL%" --format "bestaudio[ext=webm]/bestaudio/best" --no-overwrites --continue --ignore-errors --no-warnings --sleep-interval 30 --max-sleep-interval 180 --sleep-requests 2 --download-archive "%ARCHIVE%" -o "%TARGET_DIR%\%%(title)s [%%(id)s].%%(ext)s" -a "%SHUFFLED_LIST%"
 
 set DONE=0
-for /f %%i in ('dir /b /a-d "%TARGET_DIR%\*.webm" 2^>nul ^| find /v /c ""') do set DONE=%%i
+for /f %%i in ('type "%ARCHIVE%" 2^>nul ^| find /c "youtube "') do set DONE=%%i
+set /a STILL=%TOTAL% - %DONE%
 echo.
-echo Progress: %DONE% of %TOTAL% videos downloaded.
+echo Progress: %DONE% of %TOTAL% videos in archive  (%STILL% still to download)
 
 if %DONE% geq %TOTAL% (
     echo.
