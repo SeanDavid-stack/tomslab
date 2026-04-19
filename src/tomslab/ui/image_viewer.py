@@ -225,3 +225,20 @@ class ImageViewerDialog(QDialog):
             self.close()
             return
         super().keyPressEvent(event)
+
+    def wheelEvent(self, event) -> None:
+        """Mouse-wheel zoom. Wheel up zooms in, wheel down zooms out.
+        Shift+wheel leaves scrolling alone (pan horizontally in the
+        scroll area's native behavior). No modifier required — this is
+        an image viewer, not a doc reader, so zoom is the natural
+        default."""
+        delta = event.angleDelta().y()
+        if delta == 0:
+            super().wheelEvent(event)
+            return
+        mods = event.modifiers()
+        if mods & Qt.KeyboardModifier.ShiftModifier:
+            super().wheelEvent(event)
+            return
+        self._zoom_by(self._ZOOM_STEP if delta > 0 else 1 / self._ZOOM_STEP)
+        event.accept()
