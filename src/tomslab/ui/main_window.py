@@ -159,35 +159,19 @@ class MainWindow(QMainWindow):
             wizard_mark_done(self._conn)
 
     def _show_first_run_disclaimer(self) -> bool:
-        """First-launch click-to-agree gate. Returns True if the user
-        affirmatively accepts the Disclaimer & Legal terms — that's
-        what unlocks the app. Returns False on decline or close.
+        """First-launch click-to-agree gate. Returns True iff the user
+        scrolled through the full text and clicked 'I have read and
+        accept these terms'. Any other outcome (Decline, Esc, X) returns
+        False and unwinds the launch.
 
-        WindowStaysOnTopHint ensures the gate comes up IN FRONT of
-        whatever other app had focus when Tom's Lab launched — users
-        shouldn't have to hunt for the dialog behind Firefox or their
-        download batch console."""
-        box = QMessageBox(self)
-        box.setWindowTitle("Tom's Lab — Required: review & accept terms")
-        box.setIcon(QMessageBox.Icon.Warning)
-        box.setTextFormat(Qt.TextFormat.RichText)
-        box.setText(self._disclaimer_html())
-        box.setWindowFlags(
-            box.windowFlags() | Qt.WindowType.WindowStaysOnTopHint
-        )
-        accept = box.addButton(
-            "I have read and accept these terms",
-            QMessageBox.ButtonRole.AcceptRole,
-        )
-        decline = box.addButton(
-            "Decline and exit",
-            QMessageBox.ButtonRole.RejectRole,
-        )
-        box.setDefaultButton(decline)
-        box.raise_()
-        box.activateWindow()
-        box.exec()
-        return box.clickedButton() is accept
+        Uses DisclaimerGateDialog so the text is scrollable (fits any
+        monitor), fixed-size, and the accept button is disabled until
+        the scroll bar reaches the bottom — stronger click-wrap than
+        the previous QMessageBox which could hide text off-screen."""
+        from tomslab.ui.disclaimer_dialog import DisclaimerGateDialog
+        dlg = DisclaimerGateDialog(self._disclaimer_html(), parent=self)
+        dlg.exec()
+        return dlg.accepted()
 
     # ------------------------------------------------------------------
     # palette
