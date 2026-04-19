@@ -192,27 +192,25 @@ class MainWindow(QMainWindow):
         self.setPalette(pal)
 
     def showEvent(self, event) -> None:   # type: ignore[override]
-        """Force the app window to the foreground on every show. Without
-        this, launching Tom's Lab while Firefox / the batch console /
-        another app has focus leaves the window (and the first-run
-        click-to-agree modal) behind everything — users miss them.
-
-        The briefly-on-top trick is the Qt idiom on Windows: raise,
-        activate, and toggle WindowStaysOnTopHint so the OS's
-        focus-stealing prevention lets us through. The flag clears
-        immediately so the window doesn't actually stick on top."""
+        """Force the app window to the foreground the FIRST time it's
+        shown. Subsequent shows (e.g. unminimize) skip the foreground
+        dance — otherwise ``self.show()`` inside the helper re-enters
+        showEvent and we infinite-recurse into a RecursionError."""
         super().showEvent(event)
-        self._force_foreground()
+        if getattr(self, "_foregrounded_once", False):
+            return
+        self._foregrounded_once = True
+        # Defer so Qt's own show handling fully settles before we start
+        # toggling window flags; calling setWindowFlags() mid-showEvent
+        # can also trigger a second showEvent.
+        QTimer.singleShot(0, self._force_foreground)
 
     def _force_foreground(self) -> None:
-        from PyQt6.QtCore import Qt
+        """Bring the window in front of other apps. Qt-on-Windows idiom:
+        raise + activate; Windows' focus-stealing prevention usually
+        lets us through from inside our own process."""
         self.raise_()
         self.activateWindow()
-        flags = self.windowFlags()
-        self.setWindowFlags(flags | Qt.WindowType.WindowStaysOnTopHint)
-        self.show()
-        self.setWindowFlags(flags)
-        self.show()
 
     # ------------------------------------------------------------------
     # menus
