@@ -471,13 +471,24 @@ class ChatView(QWidget):
             '</div>'
         )
 
-    @staticmethod
-    def _linkify_citations(text: str, labels: dict[str, str] | None = None) -> str:
-        """Turn [msg:ID] and [doc:ID] into HTML anchors with friendly labels.
+    # Per-source pill styling so Discord, PDF, and YouTube citations are
+    # distinguishable at a glance rather than sharing one gold pill.
+    # Discord → channel blue-violet. PDF → warm gold (author-authored docs).
+    # Video → YouTube red. Each uses a soft tinted background + matching text.
+    _PILL_STYLES: dict[str, dict[str, str]] = {
+        "msg": {"fg": "#8FA1FF", "bg": "rgba(88,101,242,0.14)"},
+        "doc": {"fg": "#FFC857", "bg": "rgba(255,200,87,0.12)"},
+        "vid": {"fg": "#FF6B6B", "bg": "rgba(255,77,77,0.14)"},
+    }
 
-        ``labels`` maps the raw "msg:123"/"doc:42" key to a human label
-        like "Tom B · May 2023" or "AMT · p46". The ID is still encoded
-        in the anchor href so clicks route correctly.
+    @classmethod
+    def _linkify_citations(cls, text: str, labels: dict[str, str] | None = None) -> str:
+        """Turn [msg:ID], [doc:ID], [vid:ID] into HTML anchors with friendly
+        labels and per-source color coding.
+
+        ``labels`` maps the raw "msg:123"/"doc:42"/"vid:17" key to a human
+        label. The ID is still encoded in the anchor href so clicks route
+        correctly.
         """
         labels = labels or {}
         out: list[str] = []
@@ -488,17 +499,17 @@ class ChatView(QWidget):
                 out.append(html.escape(text[last_end:start]))
             kind, raw = m.group(1), m.group(2)
             href = f"{kind}:{raw}"
-            # Friendly label with fallback if the DB lookup missed.
             friendly = labels.get(href)
             if not friendly:
                 friendly = {"msg": "msg", "doc": "doc", "vid": "▶ video"}.get(
                     kind, kind
                 )
             label = html.escape(friendly)
+            style = cls._PILL_STYLES.get(kind, cls._PILL_STYLES["doc"])
             out.append(
                 f'<a href="{html.escape(href)}" '
-                f'style="color: {COLOR_AUTHOR_TOM}; text-decoration: none; '
-                f'background: rgba(255,200,87,0.12); padding: 1px 6px;'
+                f'style="color: {style["fg"]}; text-decoration: none; '
+                f'background: {style["bg"]}; padding: 1px 6px;'
                 f' border-radius: 4px; font-weight: 500;">{label}</a>'
             )
             last_end = end
