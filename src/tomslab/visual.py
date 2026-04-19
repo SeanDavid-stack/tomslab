@@ -23,14 +23,34 @@ from tomslab import db as dbmod
 
 log = logging.getLogger(__name__)
 
-try:
-    import open_clip  # type: ignore
-    import torch      # type: ignore
-    from PIL import Image
-except ImportError:
-    open_clip = None  # type: ignore
-    torch = None      # type: ignore
-    Image = None      # type: ignore
+# Lazy — torch + open_clip together take 10-30s on Windows CUDA and
+# can hang entirely under page-file pressure or when another process
+# (e.g. faster-whisper) is actively using the GPU. Loading them at
+# module top blocks the entire app from launching. We only need them
+# when CLIP search is actually used, not at startup.
+open_clip = None  # type: ignore
+torch = None      # type: ignore
+Image = None      # type: ignore
+
+
+def _ensure_vision_loaded() -> bool:
+    """Lazy import helper. True if torch/open_clip/PIL are available."""
+    global open_clip, torch, Image
+    if torch is not None:
+        return True
+    try:
+        import open_clip as _oc
+        import torch as _t
+        from PIL import Image as _Im
+        open_clip = _oc
+        torch = _t
+        Image = _Im
+        return True
+    except ImportError:
+        return False
+    except Exception as exc:
+        log.warning("torch/open_clip failed to load: %s", exc)
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -62,7 +82,7 @@ def load_clip(
     pretrained: str = "openai",
 ) -> CLIPBundle:
     global _model
-    if open_clip is None or torch is None:
+    if not _ensure_vision_loaded():
         raise RuntimeError(
             "open_clip / torch not installed — Phase 4 visual features unavailable"
         )
