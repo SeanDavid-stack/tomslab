@@ -1,7 +1,21 @@
-"""Ollama local-model provider."""
+"""Ollama local-model provider.
+
+**HTTP-first implementation.** Historically this module used the
+`ollama` Python SDK. That package has been observed to hang on
+`import` on some Windows boxes (antivirus, DLL loader, or CUDA
+driver state), producing silent 'Thinking…' forever with no error.
+Since Ollama's REST API is stable and trivial (3 endpoints), we now
+talk to the local daemon via stdlib urllib. No third-party package
+required, no import-time hang possible.
+"""
 from __future__ import annotations
 
+import base64
+import json
 import logging
+import urllib.error
+import urllib.request
+from pathlib import Path
 
 from tomslab.ai.base import AIProvider, ProviderError, ProviderUnavailable
 
@@ -60,6 +74,8 @@ DEFAULT_VISION_MODEL = "llava:13b"
 class OllamaProvider(AIProvider):
     name = "ollama"
 
+    DEFAULT_HOST = "http://127.0.0.1:11434"
+
     def __init__(
         self,
         host: str | None = None,
@@ -68,16 +84,14 @@ class OllamaProvider(AIProvider):
         vision_model: str = DEFAULT_VISION_MODEL,
         chat_timeout: float = 180.0,
     ) -> None:
-        _ensure_ollama_loaded()
-        # Ollama client takes an optional timeout via httpx — pass through so
-        # a hung local call fails cleanly instead of spinning forever.
-        if host:
-            self._client = _ollama.Client(host=host, timeout=chat_timeout)
-        else:
-            self._client = _ollama.Client(timeout=chat_timeout)
+        # NOTE: no ollama-package import here. We speak the REST API
+        # directly via urllib so a broken / hung `import ollama` can't
+        # take the app down.
+        self._host = (host or self.DEFAULT_HOST).rstrip("/")
         self._embed_model = embed_model
         self._chat_model = chat_model
         self._vision_model = vision_model
+        self._chat_timeout = chat_timeout
         self._dim: int | None = None
 
     # ---- capability flags ---------------------------------------------
@@ -85,14 +99,44 @@ class OllamaProvider(AIProvider):
     def supports_chat(self) -> bool: return True
     def supports_vision(self) -> bool: return True
 
+    # ---- HTTP plumbing -------------------------------------------------
+    def _post(self, path: str, payload: dict, *, timeout: float) -> dict:
+        url = f"{self._host}{path}"
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=data, method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                body = resp.read()
+        except urllib.error.URLError as exc:
+            raise ProviderUnavailable(f"ollama daemon unreachable: {exc}") from exc
+        except Exception as exc:
+            raise ProviderError(f"ollama request failed: {exc}") from exc
+        try:
+            return json.loads(body)
+        except Exception as exc:
+            raise ProviderError(f"ollama returned non-JSON: {exc}") from exc
+
+    def _get(self, path: str, *, timeout: float = 10.0) -> dict:
+        url = f"{self._host}{path}"
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as resp:
+                return json.loads(resp.read())
+        except urllib.error.URLError as exc:
+            raise ProviderUnavailable(f"ollama daemon unreachable: {exc}") from exc
+        except Exception as exc:
+            raise ProviderError(f"ollama request failed: {exc}") from exc
+
     # ---- health --------------------------------------------------------
     def ping(self) -> str:
         try:
-            resp = self._client.list()
-        except Exception as exc:
-            raise ProviderUnavailable(f"ollama daemon unreachable: {exc}") from exc
-        # ollama.ListResponse exposes .models; each has .model (name)
-        model_names = sorted(m.model for m in (resp.models or []))
+            data = self._get("/api/tags")
+        except ProviderUnavailable:
+            raise
+        models = data.get("models") or []
+        model_names = sorted(m.get("name") or m.get("model") or "" for m in models)
         need = [self._embed_model, self._chat_model, self._vision_model]
         missing = [m for m in need if not any(n.startswith(m) for n in model_names)]
         if missing:
@@ -105,21 +149,22 @@ class OllamaProvider(AIProvider):
 
     def embedding_dim(self) -> int:
         if self._dim is None:
-            # probe once
-            r = self._client.embed(model=self._embed_model, input="probe")
-            self._dim = len(r.embeddings[0]) if r.embeddings else 0
+            vecs = self.embed_texts(["probe"])
+            self._dim = len(vecs[0]) if vecs else 0
         return self._dim
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
-        try:
-            r = self._client.embed(model=self._embed_model, input=texts)
-        except Exception as exc:
-            raise ProviderError(f"ollama embed failed: {exc}") from exc
-        if self._dim is None and r.embeddings:
-            self._dim = len(r.embeddings[0])
-        return [list(v) for v in r.embeddings]
+        data = self._post(
+            "/api/embed",
+            {"model": self._embed_model, "input": texts},
+            timeout=120.0,
+        )
+        vecs = data.get("embeddings") or []
+        if self._dim is None and vecs:
+            self._dim = len(vecs[0])
+        return [list(v) for v in vecs]
 
     # ---- chat ----------------------------------------------------------
     # Known-multimodal model names. If chat_model is one of these we trust
@@ -130,6 +175,12 @@ class OllamaProvider(AIProvider):
     def _is_multimodal(self, model_name: str) -> bool:
         n = (model_name or "").lower()
         return any(n.startswith(pref) for pref in self._MULTIMODAL_PREFIXES)
+
+    @staticmethod
+    def _image_b64(path: str) -> str:
+        """Ollama's REST API expects images as base64 strings in the
+        message's 'images' array."""
+        return base64.b64encode(Path(path).read_bytes()).decode("ascii")
 
     def chat(
         self,
@@ -142,10 +193,6 @@ class OllamaProvider(AIProvider):
             msgs.append({"role": "system", "content": system})
         msgs.extend(messages)
 
-        # If the user attached an image, we MUST use a multimodal model —
-        # otherwise the model answers blindly against retrieved text context
-        # and fabricates prices from that context. Switch to vision_model
-        # (llava) for this call if the configured chat_model is text-only.
         model = self._chat_model
         if image_paths:
             if not self._is_multimodal(self._chat_model):
@@ -164,24 +211,32 @@ class OllamaProvider(AIProvider):
                         f"Gemini, change chat_model_ollama to a multimodal "
                         f"model (e.g. llava), or remove the image."
                     )
+            encoded = [self._image_b64(p) for p in image_paths]
             for i in range(len(msgs) - 1, -1, -1):
                 if msgs[i].get("role") == "user":
-                    msgs[i] = {**msgs[i], "images": list(image_paths)}
+                    msgs[i] = {**msgs[i], "images": encoded}
                     break
 
-        try:
-            r = self._client.chat(model=model, messages=msgs)
-        except Exception as exc:
-            raise ProviderError(f"ollama chat failed: {exc}") from exc
-        return (r.message.content or "").strip()
+        data = self._post(
+            "/api/chat",
+            {"model": model, "messages": msgs, "stream": False},
+            timeout=self._chat_timeout,
+        )
+        return ((data.get("message") or {}).get("content") or "").strip()
 
     # ---- vision --------------------------------------------------------
     def describe_image(self, image_path: str, prompt: str) -> str:
-        try:
-            r = self._client.chat(
-                model=self._vision_model,
-                messages=[{"role": "user", "content": prompt, "images": [image_path]}],
-            )
-        except Exception as exc:
-            raise ProviderError(f"ollama vision failed: {exc}") from exc
-        return (r.message.content or "").strip()
+        data = self._post(
+            "/api/chat",
+            {
+                "model": self._vision_model,
+                "messages": [{
+                    "role": "user",
+                    "content": prompt,
+                    "images": [self._image_b64(image_path)],
+                }],
+                "stream": False,
+            },
+            timeout=self._chat_timeout,
+        )
+        return ((data.get("message") or {}).get("content") or "").strip()
