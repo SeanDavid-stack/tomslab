@@ -1288,10 +1288,21 @@ class MainWindow(QMainWindow):
     def _on_video_progress(self, stage: str, current: int, total: int) -> None:
         # Persistent pill on the right side — survives tab changes and
         # other status-label updates so the user can always see
-        # transcription is live.
+        # transcription is live. When the stage string contains a
+        # per-file timestamp (e.g. 'Transcribing abc  0:07:13 / 1:23:45'),
+        # surface that in the pill so users see both file-level AND
+        # within-file progress.
+        file_progress = ""
+        if " / " in stage and stage.count(":") >= 4:
+            # Extract the 'H:MM:SS / H:MM:SS' tail for the pill.
+            try:
+                file_progress = stage.split()[-3] + " / " + stage.split()[-1]
+            except Exception:
+                file_progress = ""
         if total > 0:
+            core = f"📼 Transcribing {current + 1:,}/{total:,}"
             self._transcription_pill.setText(
-                f"📼 Transcribing {current:,}/{total:,}"
+                f"{core}  ·  {file_progress}" if file_progress else core
             )
             self._progress_bar.setRange(0, total)
             self._progress_bar.setValue(current)

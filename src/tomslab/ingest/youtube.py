@@ -546,22 +546,37 @@ class Segment:
     text: str
 
 
-def transcribe(audio_path: Path, model_name: str = "large-v3") -> list[Segment]:
+def transcribe(
+    audio_path: Path,
+    model_name: str = "large-v3",
+    *,
+    on_segment: "Callable[[float, float], None] | None" = None,
+) -> list[Segment]:
+    """Transcribe audio. If ``on_segment`` is given, it's called after
+    every segment with ``(segment_end_sec, total_duration_sec)`` so the
+    caller can show per-file progress (e.g. 'Transcribing clip 42:  07:13 / 1:23:45')."""
     model = _load_whisper(model_name)
-    segments, _info = model.transcribe(
+    segments, info = model.transcribe(
         str(audio_path),
         vad_filter=True,           # skip silence — huge speed win
         vad_parameters={"min_silence_duration_ms": 700},
         language="en",
         condition_on_previous_text=True,
     )
+    total = float(getattr(info, "duration", 0.0) or 0.0)
     out: list[Segment] = []
     for s in segments:
+        end = float(s.end or 0.0)
         out.append(Segment(
             start=float(s.start or 0.0),
-            end=float(s.end or 0.0),
+            end=end,
             text=(s.text or "").strip(),
         ))
+        if on_segment is not None:
+            try:
+                on_segment(end, total)
+            except Exception:
+                pass   # progress reporting must never kill a transcription
     return out
 
 
@@ -774,6 +789,14 @@ def _derive_id_from_path(path: Path) -> str:
     return f"local_{h}"
 
 
+def _hhmmss(sec: float) -> str:
+    """Seconds → H:MM:SS for progress display."""
+    s = int(max(0.0, sec or 0.0))
+    h, rem = divmod(s, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}"
+
+
 def _probe_duration_sec(path: Path) -> int:
     """Best-effort audio duration via ffprobe. Returns 0 if not available."""
     import subprocess
@@ -924,7 +947,19 @@ def ingest_folder(
                     "UPDATE videos SET duration_sec = ? WHERE id = ?",
                     (dur, vid),
                 )
-            segs = transcribe(audio, model_name=model_name)
+            # Per-file progress callback. Emits into the same `progress`
+            # channel the outer loop uses, with stage string that
+            # includes 'HH:MM:SS / HH:MM:SS' so the UI pill can show
+            # how far into the current file we are.
+            def _on_segment(end_sec: float, total_sec: float, _i=i, _vid=vid):
+                if progress and total_sec > 0:
+                    stage = (
+                        f"Transcribing {_vid}  "
+                        f"{_hhmmss(end_sec)} / {_hhmmss(total_sec)}"
+                    )
+                    progress(stage, _i - 1, total)
+            segs = transcribe(audio, model_name=model_name,
+                              on_segment=_on_segment)
             chunks = chunk_segments(segs)
             store_chunks(conn, vid, chunks)
             conn.execute(
