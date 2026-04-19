@@ -161,12 +161,20 @@ class MainWindow(QMainWindow):
     def _show_first_run_disclaimer(self) -> bool:
         """First-launch click-to-agree gate. Returns True if the user
         affirmatively accepts the Disclaimer & Legal terms — that's
-        what unlocks the app. Returns False on decline or close."""
+        what unlocks the app. Returns False on decline or close.
+
+        WindowStaysOnTopHint ensures the gate comes up IN FRONT of
+        whatever other app had focus when Tom's Lab launched — users
+        shouldn't have to hunt for the dialog behind Firefox or their
+        download batch console."""
         box = QMessageBox(self)
         box.setWindowTitle("Tom's Lab — Required: review & accept terms")
         box.setIcon(QMessageBox.Icon.Warning)
         box.setTextFormat(Qt.TextFormat.RichText)
         box.setText(self._disclaimer_html())
+        box.setWindowFlags(
+            box.windowFlags() | Qt.WindowType.WindowStaysOnTopHint
+        )
         accept = box.addButton(
             "I have read and accept these terms",
             QMessageBox.ButtonRole.AcceptRole,
@@ -176,6 +184,8 @@ class MainWindow(QMainWindow):
             QMessageBox.ButtonRole.RejectRole,
         )
         box.setDefaultButton(decline)
+        box.raise_()
+        box.activateWindow()
         box.exec()
         return box.clickedButton() is accept
 
@@ -196,6 +206,29 @@ class MainWindow(QMainWindow):
         pal.setColor(QPalette.ColorRole.ToolTipBase, QColor("#2B2D31"))
         pal.setColor(QPalette.ColorRole.ToolTipText, QColor("#DBDEE1"))
         self.setPalette(pal)
+
+    def showEvent(self, event) -> None:   # type: ignore[override]
+        """Force the app window to the foreground on every show. Without
+        this, launching Tom's Lab while Firefox / the batch console /
+        another app has focus leaves the window (and the first-run
+        click-to-agree modal) behind everything — users miss them.
+
+        The briefly-on-top trick is the Qt idiom on Windows: raise,
+        activate, and toggle WindowStaysOnTopHint so the OS's
+        focus-stealing prevention lets us through. The flag clears
+        immediately so the window doesn't actually stick on top."""
+        super().showEvent(event)
+        self._force_foreground()
+
+    def _force_foreground(self) -> None:
+        from PyQt6.QtCore import Qt
+        self.raise_()
+        self.activateWindow()
+        flags = self.windowFlags()
+        self.setWindowFlags(flags | Qt.WindowType.WindowStaysOnTopHint)
+        self.show()
+        self.setWindowFlags(flags)
+        self.show()
 
     # ------------------------------------------------------------------
     # menus
