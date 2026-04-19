@@ -310,6 +310,7 @@ class MainWindow(QMainWindow):
         # --- concept chips (Tom's glossary) ----------------------------
         self._concept_bar = ConceptChipBar(self._conn, self)
         self._concept_bar.concept_clicked.connect(self._on_concept_clicked)
+        self._concept_bar.evolution_requested.connect(self._on_evolution_requested)
         outer.addWidget(self._concept_bar)
 
         # --- empty state hint ------------------------------------------
@@ -483,6 +484,40 @@ class MainWindow(QMainWindow):
             self._noise_toggle.setText("🔇 Hiding reactions")
         else:
             self._noise_toggle.setText("🔊 Showing everything")
+
+    def _on_evolution_requested(self, term: str) -> None:
+        """Right-click on a concept chip → dedicated timeline dialog
+        showing how Tom's framing of that term has shifted across
+        quarters of Discord + TomTube transcripts."""
+        from tomslab.ui.evolution_dialog import EvolutionDialog
+        dlg = EvolutionDialog(
+            self._conn,
+            term,
+            on_citation_clicked=self._jump_to_message_citation,
+            parent=self,
+        )
+        dlg.exec()
+
+    def _jump_to_message_citation(self, kind: str, raw: str) -> None:
+        """Shared handler used by both the chat view's citation pills and
+        the evolution dialog — opens Tom's Lab's detail dialog for
+        msg/doc citations. Video citations are handled inline in the
+        evolution dialog itself."""
+        if kind not in ("msg", "doc"):
+            return
+        try:
+            from tomslab.ui.detail_dialog import DetailDialog
+        except ImportError:
+            return
+        if self._detail_dialog is None:
+            self._detail_dialog = DetailDialog(self._conn, self)
+        if kind == "msg":
+            self._detail_dialog.show_message(raw)
+        else:
+            try:
+                self._detail_dialog.show_doc_page(int(raw))
+            except (ValueError, AttributeError):
+                return
 
     def _on_concept_clicked(self, term: str) -> None:
         """Glossary chip click routes based on the active tab.

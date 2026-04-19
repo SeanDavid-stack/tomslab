@@ -39,7 +39,8 @@ TOP_N_DEFAULT = 12   # default number of chips shown (the rest are behind "Show 
 
 
 class ConceptChipBar(QWidget):
-    concept_clicked = pyqtSignal(str)   # emits the term/abbreviation string
+    concept_clicked = pyqtSignal(str)     # left-click  → search/ask
+    evolution_requested = pyqtSignal(str)  # right-click → evolution timeline
 
     def __init__(self, conn: sqlite3.Connection, parent=None) -> None:
         super().__init__(parent)
@@ -126,6 +127,14 @@ class ConceptChipBar(QWidget):
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             search_term = label
             btn.clicked.connect(lambda _checked, t=search_term: self.concept_clicked.emit(t))
+            # Right-click → evolution timeline. Using a context-menu hook
+            # on the button so the primary left-click search behavior is
+            # untouched.
+            btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            btn.customContextMenuRequested.connect(
+                lambda _pos, t=search_term: self._show_context_menu(t)
+            )
+            btn.setToolTip(tooltip + "<br><br><i>Right-click for evolution timeline</i>")
             self._chips_layout.insertWidget(self._chips_layout.count() - 1, btn)
 
         # Trailing "more" / "collapse" toggle.
@@ -147,6 +156,16 @@ class ConceptChipBar(QWidget):
     def _on_toggle_expanded(self) -> None:
         self._expanded = not self._expanded
         self.reload()
+
+    def _show_context_menu(self, term: str) -> None:
+        """Right-click menu on a chip. One action — Show evolution — which
+        the host wires to open the EvolutionDialog via ``evolution_requested``."""
+        from PyQt6.QtWidgets import QMenu
+        menu = QMenu(self)
+        evo = menu.addAction(f"Show how Tom's framing of {term} evolved…")
+        chosen = menu.exec(self.cursor().pos())
+        if chosen is evo:
+            self.evolution_requested.emit(term)
 
     def count(self) -> int:
         return max(0, self._chips_layout.count() - 1)
