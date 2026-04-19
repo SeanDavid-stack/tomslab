@@ -455,18 +455,44 @@ def download_audio(video_id: str, bitrate_kbps: int = 96) -> Path:
 _whisper: "WhisperModel | None" = None
 
 
+def _detect_device_with_timeout(timeout: float = 15.0) -> str:
+    """Run `import torch; torch.cuda.is_available()` with a timeout.
+    If it hangs (a known failure mode: wedged DLL loader, AV scan,
+    corrupted CUDA driver state), fall back to CPU with a log warning
+    instead of hanging the transcription worker indefinitely."""
+    import threading
+    result = {"device": "cpu"}
+
+    def _probe():
+        try:
+            import torch   # may hang
+            result["device"] = "cuda" if torch.cuda.is_available() else "cpu"
+        except Exception as exc:
+            result["err"] = exc
+
+    t = threading.Thread(target=_probe, daemon=True)
+    t.start()
+    t.join(timeout=timeout)
+    if t.is_alive():
+        log.warning(
+            "torch/CUDA probe timed out after %ss — falling back to CPU "
+            "transcription for this session. This is a machine-level "
+            "issue (antivirus / DLL loader / CUDA driver); a reboot "
+            "usually clears it.",
+            timeout,
+        )
+        return "cpu"
+    return result["device"]
+
+
 def _load_whisper(model_name: str = "large-v3") -> "WhisperModel":
     global _whisper
     if _whisper is not None:
         return _whisper
     if WhisperModel is None:
         raise RuntimeError("faster-whisper not installed")
-    try:
-        # GPU float16 if CUDA is available; fall back to CPU int8.
-        import torch  # lazy — only needed to check CUDA
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-    except Exception:
-        device = "cpu"
+    log.info("Probing CUDA availability (with timeout)…")
+    device = _detect_device_with_timeout()
     compute = "float16" if device == "cuda" else "int8"
     log.info("Loading faster-whisper %s on %s (%s)", model_name, device, compute)
     _whisper = WhisperModel(model_name, device=device, compute_type=compute)
