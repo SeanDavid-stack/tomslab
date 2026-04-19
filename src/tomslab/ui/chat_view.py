@@ -474,7 +474,11 @@ class ChatView(QWidget):
         save_footer = (
             f'<div style="margin-left: 38px; margin-top: 6px;">'
             f'<a href="save:{idx}" style="color: {COLOR_DIM}; text-decoration: none;'
-            f' font-size: 11px;">⭐ Save this answer</a></div>'
+            f' font-size: 11px;">⭐ Save this answer</a>'
+            f'&nbsp;&nbsp;·&nbsp;&nbsp;'
+            f'<a href="export:{idx}" style="color: {COLOR_DIM};'
+            f' text-decoration: none; font-size: 11px;">📥 Export…</a>'
+            f'</div>'
         )
         return (
             '<div style="margin: 18px 0 10px 0;">'
@@ -1076,6 +1080,9 @@ class ChatView(QWidget):
         if href.startswith("save:"):
             self._save_answer(href[len("save:"):])
             return
+        if href.startswith("export:"):
+            self._export_answer(href[len("export:"):])
+            return
         m = re.match(r"^(msg|doc|vid):(.+)$", href)
         if not m:
             return
@@ -1126,6 +1133,144 @@ class ChatView(QWidget):
         self._status.setText(
             f"⭐ Saved — view it in the Bookmarks tab · Ctrl+Enter to ask again"
         )
+
+    def _export_answer(self, idx_str: str) -> None:
+        """Write the question + answer + resolved sources to a file the
+        user picks (Markdown or plain text). PDF export goes through Qt's
+        HTML→PDF path so no extra dependency is needed."""
+        try:
+            idx = int(idx_str)
+        except ValueError:
+            return
+        if idx < 0 or idx >= len(self._history):
+            return
+        answer_turn = self._history[idx]
+        if answer_turn.role != "assistant":
+            return
+        question = ""
+        for j in range(idx - 1, -1, -1):
+            if self._history[j].role == "user":
+                question = self._history[j].content
+                break
+
+        from PyQt6.QtWidgets import QFileDialog
+        default_name = self._default_export_filename(question)
+        path, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export answer",
+            default_name,
+            "Markdown (*.md);;Plain text (*.txt);;PDF (*.pdf)",
+        )
+        if not path:
+            return
+
+        from pathlib import Path
+        p = Path(path)
+        if p.suffix.lower() == ".pdf":
+            self._export_pdf(p, question, answer_turn.content)
+        else:
+            text = self._render_export_markdown(question, answer_turn.content)
+            try:
+                p.write_text(text, encoding="utf-8")
+            except Exception as exc:
+                self._status.setText(f"Export failed: {exc}")
+                return
+        self._status.setText(f"📥 Exported to {p.name}")
+
+    def _default_export_filename(self, question: str) -> str:
+        """Sanitise the question into a filesystem-safe stem."""
+        import re as _re
+        from datetime import datetime
+        stem = _re.sub(r"[^A-Za-z0-9 _-]+", "", (question or "tomslab-answer"))
+        stem = stem.strip().replace(" ", "_")[:60] or "tomslab-answer"
+        date = datetime.now().strftime("%Y-%m-%d")
+        return f"{date}_{stem}.md"
+
+    def _render_export_markdown(self, question: str, answer: str) -> str:
+        """Plain-Markdown version of the answer with resolved sources so
+        the exported file is readable on its own, not just inside the app."""
+        from datetime import datetime
+        labels = self._resolve_citation_labels(answer)
+        # Replace each [kind:ID] with "[label]" so the exported file is
+        # readable without the app to resolve citations.
+        def _repl(m):
+            kind, raw = m.group(1), m.group(2)
+            friendly = labels.get(f"{kind}:{raw}") or f"{kind}:{raw}"
+            return f"[{friendly}]"
+        body = CITATION_RE.sub(_repl, answer)
+
+        # Group sources the same way the panel does.
+        buckets: dict[str, list[str]] = {"msg": [], "doc": [], "vid": []}
+        seen: dict[str, set[str]] = {"msg": set(), "doc": set(), "vid": set()}
+        for m in CITATION_RE.finditer(answer):
+            kind, raw = m.group(1), m.group(2)
+            if kind in buckets and raw not in seen[kind]:
+                seen[kind].add(raw)
+                buckets[kind].append(raw)
+
+        title = question or "Tom's Lab answer"
+        lines = [
+            f"# {title}",
+            "",
+            f"*Exported {datetime.now().strftime('%Y-%m-%d %H:%M')} from Tom's Lab*",
+            "",
+            "---",
+            "",
+            body,
+            "",
+            "---",
+            "",
+            "## Sources",
+            "",
+        ]
+        for kind, heading in (("msg", "Discord"), ("doc", "PDFs"),
+                              ("vid", "TomTube")):
+            if not buckets[kind]:
+                continue
+            lines.append(f"**{heading}**")
+            for raw in buckets[kind]:
+                label = labels.get(f"{kind}:{raw}") or raw
+                lines.append(f"- {label}  (`{kind}:{raw}`)")
+            lines.append("")
+
+        lines += [
+            "---",
+            "",
+            "*Tom's Lab is an independent study tool by SDE-Software "
+            "(SDES.DEV). Not affiliated with Bookmap, Tom B, or the "
+            "Bookmap Discord. AI output can be wrong — verify "
+            "independently. This is not financial advice.*",
+        ]
+        return "\n".join(lines)
+
+    def _export_pdf(self, path, question: str, answer: str) -> None:
+        """Render the Markdown export as PDF via Qt's QTextDocument.
+        Uses the in-app linkification so citation pills render as colored
+        text in the PDF too."""
+        from PyQt6.QtGui import QTextDocument
+        from PyQt6.QtPrintSupport import QPrinter
+        labels = self._resolve_citation_labels(answer)
+        body_html = self._linkify_citations(answer, labels)
+        sources_html = self._sources_panel_html(answer, labels)
+        from datetime import datetime
+        html_doc = (
+            f"<h1>{(question or 'Tom&apos;s Lab answer')}</h1>"
+            f"<p><i>Exported {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+            " from Tom's Lab</i></p><hr>"
+            f"<div style='white-space:pre-wrap; line-height:1.55;'>{body_html}</div>"
+            f"<hr>{sources_html}"
+            "<hr><p style='color:#777; font-size:10px;'>"
+            "Tom's Lab is an independent study tool by SDE-Software (SDES.DEV). "
+            "Not affiliated with Bookmap, Tom B, or the Bookmap Discord. "
+            "AI output can be wrong — verify independently. "
+            "This is not financial advice.</p>"
+        )
+        doc = QTextDocument()
+        doc.setHtml(html_doc)
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+        printer.setOutputFileName(str(path))
+        doc.print(printer)
 
 
 # ---------------------------------------------------------------------------
