@@ -425,11 +425,8 @@ class ChatView(QWidget):
         )
         body = (
             f'<div style="max-width: 720px; margin: 40px auto; color: {COLOR_DIM};">'
-            f'<div style="display:inline-block; background:{COLOR_AUTHOR_TOM};'
-            f' color:#1E1F22; width:48px; height:48px; border-radius:24px;'
-            f' text-align:center; line-height:48px; font-weight:700;'
-            f' font-size: 22px; margin-bottom: 14px;">T</div>'
-            f'<h2 style="color: {COLOR_TEXT}; font-weight: 600; margin: 0 0 8px 0;">Ask Tom\'s Lab</h2>'
+            f'<h2 style="color: {COLOR_TEXT}; font-weight: 600; margin: 0 0 8px 0;">'
+            f'<span style="color: {COLOR_AUTHOR_TOM};">✦</span> Ask Tom\'s Lab</h2>'
             f'<p>An <b>independent study tool</b> that searches Tom B\'s publicly '
             f'shared Discord posts and reference PDFs and has an AI model '
             f'synthesise an answer. Every claim comes with <code>[citation]</code> '
