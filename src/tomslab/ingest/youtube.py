@@ -64,13 +64,41 @@ def _ensure_imageio_ffmpeg():
 
 
 def _ensure_whisper():
+    """Import faster-whisper with a hard timeout. faster_whisper
+    transitively imports torch, which on some systems hangs
+    indefinitely (DLL loader deadlock, wedged CUDA state). Without a
+    timeout that freezes the transcription worker with no log output.
+    Timeout out → we raise so the worker fails visibly and the file
+    is marked 'failed' rather than silently hanging the queue."""
     global WhisperModel
-    if WhisperModel is None:
+    if WhisperModel is not None:
+        return WhisperModel
+    import threading
+    result = {}
+
+    def _do_import():
         try:
             from faster_whisper import WhisperModel as _W
-            WhisperModel = _W   # type: ignore[assignment]
-        except ImportError:
-            WhisperModel = None
+            result["W"] = _W
+        except Exception as exc:
+            result["err"] = exc
+
+    t = threading.Thread(target=_do_import, daemon=True)
+    t.start()
+    t.join(timeout=45.0)   # faster-whisper pulls torch — allow time
+    if t.is_alive():
+        log.error(
+            "faster-whisper failed to import within 45 seconds — likely "
+            "a wedged torch/CUDA import. Transcription can't run until "
+            "the machine is rebooted. Skipping this file."
+        )
+        raise RuntimeError(
+            "faster-whisper import timed out (torch wedged) — reboot needed"
+        )
+    if "err" in result:
+        log.warning("faster-whisper import failed: %s", result["err"])
+        return None
+    WhisperModel = result["W"]
     return WhisperModel
 
 
