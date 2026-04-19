@@ -949,12 +949,14 @@ def ingest_folder(
                 )
             # Per-file progress callback. Emits into the same `progress`
             # channel the outer loop uses, with stage string that
-            # includes 'HH:MM:SS / HH:MM:SS' so the UI pill can show
-            # how far into the current file we are.
+            # includes percent + HH:MM:SS / HH:MM:SS so the UI pill
+            # shows how far into the current file we are.
             def _on_segment(end_sec: float, total_sec: float, _i=i, _vid=vid):
                 if progress and total_sec > 0:
+                    pct = max(0, min(100, int(end_sec * 100 / total_sec)))
                     stage = (
                         f"Transcribing {_vid}  "
+                        f"{pct}%  "
                         f"{_hhmmss(end_sec)} / {_hhmmss(total_sec)}"
                     )
                     progress(stage, _i - 1, total)

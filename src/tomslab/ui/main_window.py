@@ -1289,20 +1289,19 @@ class MainWindow(QMainWindow):
         # Persistent pill on the right side — survives tab changes and
         # other status-label updates so the user can always see
         # transcription is live. When the stage string contains a
-        # per-file timestamp (e.g. 'Transcribing abc  0:07:13 / 1:23:45'),
-        # surface that in the pill so users see both file-level AND
-        # within-file progress.
-        file_progress = ""
-        if " / " in stage and stage.count(":") >= 4:
-            # Extract the 'H:MM:SS / H:MM:SS' tail for the pill.
-            try:
-                file_progress = stage.split()[-3] + " / " + stage.split()[-1]
-            except Exception:
-                file_progress = ""
+        # per-file percent (e.g. 'Transcribing abc  37%  0:07:13 / 1:23:45'),
+        # surface '37%' + the clock in the pill so users see both
+        # file-level AND within-file progress.
+        import re as _re
+        m = _re.search(r"(\d{1,3})%\s+(\d+:\d{2}:\d{2})\s*/\s*(\d+:\d{2}:\d{2})",
+                       stage)
+        file_tail = ""
+        if m:
+            file_tail = f"{m.group(1)}%  ·  {m.group(2)} / {m.group(3)}"
         if total > 0:
             core = f"📼 Transcribing {current + 1:,}/{total:,}"
             self._transcription_pill.setText(
-                f"{core}  ·  {file_progress}" if file_progress else core
+                f"{core}  ·  {file_tail}" if file_tail else core
             )
             self._progress_bar.setRange(0, total)
             self._progress_bar.setValue(current)
