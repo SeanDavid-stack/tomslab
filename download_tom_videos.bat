@@ -27,6 +27,13 @@ set PYEXE="D:\Toms Lab\.venv\Scripts\python.exe"
 
 if not exist "%TARGET_DIR%" mkdir "%TARGET_DIR%"
 
+REM Start the browser-session keepalive in the background. Pings
+REM youtube.com via yt-dlp+Firefox cookies every 10-20 min (random) so
+REM the session doesn't age out mid-run and force manual re-sign-in.
+REM Inherits the parent window; dies when the user Ctrl+C's the batch.
+echo Starting YouTube session keepalive in background...
+start /B "" %PYEXE% -m tomslab.ingest.youtube_keepalive
+
 set TOTAL=0
 for /f %%i in ('type "%URL_LIST%" ^| find /v /c ""') do set TOTAL=%%i
 echo Target: %TOTAL% videos in %TARGET_DIR%

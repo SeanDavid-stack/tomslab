@@ -108,6 +108,7 @@ class MainWindow(QMainWindow):
         self._image_viewer: ImageViewerDialog | None = None
         self._detail_dialog: DetailDialog | None = None
         self._video_worker: VideoIngestWorker | None = None
+        self._keepalive_worker = None   # tomslab.ingest.youtube_keepalive.KeepAliveWorker
 
         self._search_debounce = QTimer(self)
         self._search_debounce.setSingleShot(True)
@@ -1170,6 +1171,7 @@ class MainWindow(QMainWindow):
         self._video_worker.progress.connect(self._on_video_progress)
         self._video_worker.finished_ok.connect(self._on_video_finished)
         self._video_worker.failed.connect(self._on_video_failed)
+        self._start_youtube_keepalive()
         self._video_worker.start()
 
     def _on_video_progress(self, stage: str, current: int, total: int) -> None:
@@ -1183,6 +1185,7 @@ class MainWindow(QMainWindow):
     def _on_video_finished(self, report: object) -> None:
         self._progress_bar.setVisible(False)
         self._video_worker = None
+        self._stop_youtube_keepalive()
         self._tomtube.reload()
         d = report if isinstance(report, dict) else {}
         QMessageBox.information(
@@ -1198,8 +1201,40 @@ class MainWindow(QMainWindow):
     def _on_video_failed(self, err: str) -> None:
         self._progress_bar.setVisible(False)
         self._video_worker = None
+        self._stop_youtube_keepalive()
         self._show_tomtube_off_ramp(err)
         self._refresh_status()
+
+    def _start_youtube_keepalive(self) -> None:
+        """Spin up a background pinger that keeps the Firefox YouTube
+        session alive for the duration of a long video ingest. Cheap —
+        one yt-dlp --simulate against youtube.com every 10-20 min."""
+        if self._keepalive_worker is not None:
+            return
+        try:
+            from tomslab.ingest.youtube_keepalive import KeepAliveWorker
+        except ImportError:
+            return
+        if KeepAliveWorker is None:
+            return
+        self._keepalive_worker = KeepAliveWorker(parent=self)
+        self._keepalive_worker.start()
+
+    def _stop_youtube_keepalive(self) -> None:
+        """Politely stop the keepalive thread. Called when the video
+        worker finishes or the app closes."""
+        w = self._keepalive_worker
+        if w is None:
+            return
+        try:
+            w.stop()
+            w.wait(2000)
+            if w.isRunning():
+                w.terminate()
+                w.wait(500)
+        except Exception:
+            pass
+        self._keepalive_worker = None
 
     def _show_tomtube_off_ramp(self, err: str) -> None:
         """Rich failure dialog for the direct-YouTube path. When yt-dlp
@@ -1321,6 +1356,7 @@ class MainWindow(QMainWindow):
         ingest)."""
         self._progress_bar.setVisible(False)
         self._video_worker = None
+        self._stop_youtube_keepalive()
         self._tomtube.reload()
         d = report if isinstance(report, dict) else {}
         QMessageBox.information(
@@ -1563,6 +1599,7 @@ class MainWindow(QMainWindow):
         # Close must mean close — a lingering QThread keeps the whole
         # Python process alive invisibly. Stop each worker cleanly, then
         # fall back to terminate() if it refuses to exit in time.
+        self._stop_youtube_keepalive()
         for worker in (self._worker, self._embed_worker, self._image_embed_worker,
                        self._video_worker):
             if worker is not None and worker.isRunning():
