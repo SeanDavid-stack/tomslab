@@ -94,6 +94,16 @@ class TomTubeView(QWidget):
         self._subheading = QLabel("")
         self._subheading.setStyleSheet(f"color: {_COLOR_DIM}; font-size: 11px;")
         right_lay.addWidget(self._subheading)
+        self._timestamp_note = QLabel(
+            "<i>Note: ▶ timestamps land at the start of a ~90 second window. "
+            "Listen forward from that mark — Tom's cited phrase is somewhere "
+            "within the next minute or so.</i>"
+        )
+        self._timestamp_note.setStyleSheet(
+            f"color: {_COLOR_DIM}; font-size: 10px; padding: 4px 2px 6px 2px;"
+        )
+        self._timestamp_note.setWordWrap(True)
+        right_lay.addWidget(self._timestamp_note)
 
         self._browser = QTextBrowser()
         self._browser.setOpenExternalLinks(False)
