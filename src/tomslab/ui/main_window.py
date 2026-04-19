@@ -481,6 +481,18 @@ class MainWindow(QMainWindow):
         self._status_label = QLabel("")
         self._status_label.setStyleSheet("color: #949BA4;")
         sb.addWidget(self._status_label, stretch=1)
+        # Persistent transcription-progress pill — stays visible on the
+        # right side of the status bar while a video worker is running,
+        # regardless of what the user navigates to. Separate from
+        # _status_label (which other views overwrite freely).
+        self._transcription_pill = QLabel("")
+        self._transcription_pill.setStyleSheet(
+            "QLabel { color: #1E1F22; background: #FFC857;"
+            " padding: 2px 10px; border-radius: 10px;"
+            " font-weight: 600; font-size: 11px; }"
+        )
+        self._transcription_pill.setVisible(False)
+        sb.addPermanentWidget(self._transcription_pill)
         self._progress_bar = QProgressBar()
         self._progress_bar.setMaximumWidth(240)
         self._progress_bar.setVisible(False)
@@ -1246,15 +1258,24 @@ class MainWindow(QMainWindow):
         self._video_worker.start()
 
     def _on_video_progress(self, stage: str, current: int, total: int) -> None:
+        # Persistent pill on the right side — survives tab changes and
+        # other status-label updates so the user can always see
+        # transcription is live.
         if total > 0:
+            self._transcription_pill.setText(
+                f"📼 Transcribing {current:,}/{total:,}"
+            )
             self._progress_bar.setRange(0, total)
             self._progress_bar.setValue(current)
             self._status_label.setText(f"TomTube: {stage}  ({current:,}/{total:,})")
         else:
+            self._transcription_pill.setText(f"📼 {stage}")
             self._status_label.setText(f"TomTube: {stage}")
+        self._transcription_pill.setVisible(True)
 
     def _on_video_finished(self, report: object) -> None:
         self._progress_bar.setVisible(False)
+        self._transcription_pill.setVisible(False)
         self._video_worker = None
         self._stop_youtube_keepalive()
         self._tomtube.reload()
@@ -1271,6 +1292,7 @@ class MainWindow(QMainWindow):
 
     def _on_video_failed(self, err: str) -> None:
         self._progress_bar.setVisible(False)
+        self._transcription_pill.setVisible(False)
         self._video_worker = None
         self._stop_youtube_keepalive()
         self._show_tomtube_off_ramp(err)
@@ -1477,6 +1499,7 @@ class MainWindow(QMainWindow):
         """Folder-specific completion dialog (different keys than channel
         ingest)."""
         self._progress_bar.setVisible(False)
+        self._transcription_pill.setVisible(False)
         self._video_worker = None
         self._stop_youtube_keepalive()
         self._tomtube.reload()
