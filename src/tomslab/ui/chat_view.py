@@ -233,6 +233,23 @@ class ChatView(QWidget):
         switch_row.addWidget(self._btn_gemini)
         switch_row.addWidget(self._btn_ollama)
         switch_row.addStretch(1)
+
+        # Sources-panel sort toggle. Flips chip order newest↔oldest
+        # across all past + future answers on click. Setting is persisted
+        # per-user in the settings table as ``sources_sort_order``.
+        self._sort_toggle = QPushButton("")
+        self._sort_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._sort_toggle.setStyleSheet(
+            f"QPushButton {{ background: transparent; color: {COLOR_DIM};"
+            f" padding: 4px 10px; border: 1px solid {COLOR_BORDER};"
+            f" border-radius: 12px; font-size: 11px; }}"
+            f"QPushButton:hover {{ color: {COLOR_TEXT};"
+            f" border-color: {COLOR_TEXT}; }}"
+        )
+        self._sort_toggle.clicked.connect(self._toggle_sources_sort)
+        self._refresh_sort_toggle_label()
+        switch_row.addWidget(self._sort_toggle)
+
         self._provider_hint = QLabel("")
         self._provider_hint.setStyleSheet(f"color: {COLOR_DIM}; font-size: 10px;")
         switch_row.addWidget(self._provider_hint)
@@ -493,6 +510,17 @@ class ChatView(QWidget):
         if not any(buckets.values()):
             return ""
 
+        # Sort buckets by underlying source time so the chip order reflects
+        # the user's newest↔oldest preference. Unknown/unsortable items
+        # fall to the end regardless of direction.
+        sort_order = self._sources_sort_order()
+        reverse = (sort_order == "newest")
+        if buckets["msg"]:
+            buckets["msg"] = self._sort_msg_ids(buckets["msg"], reverse=reverse)
+        if buckets["vid"]:
+            buckets["vid"] = self._sort_vid_ids(buckets["vid"], reverse=reverse)
+        # PDFs have no timestamp — leave in order of first appearance.
+
         rows: list[str] = []
         for kind, heading, emoji in (
             ("msg", "Discord", "💬"),
@@ -580,6 +608,48 @@ class ChatView(QWidget):
         if last_end < len(text):
             out.append(html.escape(text[last_end:]))
         return "".join(out)
+
+    def _sort_msg_ids(self, raw_ids: list[str], *, reverse: bool) -> list[str]:
+        """Sort Discord message-id citations by the message's timestamp.
+        ``reverse=True`` → newest first. Unknown ids fall to the end."""
+        if not raw_ids:
+            return raw_ids
+        placeholders = ",".join("?" * len(raw_ids))
+        rows = self._conn.execute(
+            f"SELECT id, timestamp FROM messages WHERE id IN ({placeholders})",
+            raw_ids,
+        ).fetchall()
+        ts = {r["id"]: (r["timestamp"] or "") for r in rows}
+        sentinel = "" if reverse else "~"   # empty sorts before, ~ sorts after
+        return sorted(raw_ids,
+                      key=lambda rid: ts.get(rid, sentinel),
+                      reverse=reverse)
+
+    def _sort_vid_ids(self, raw_ids: list[str], *, reverse: bool) -> list[str]:
+        """Sort video-chunk citations by the chunk's real-world timestamp —
+        the video's ``added_at`` plus the chunk's position within it — so
+        'newest' means 'most recently indexed video, latest chunk first'."""
+        if not raw_ids:
+            return raw_ids
+        try:
+            int_ids = [int(x) for x in raw_ids]
+        except ValueError:
+            return raw_ids
+        placeholders = ",".join("?" * len(int_ids))
+        rows = self._conn.execute(
+            f"""
+            SELECT c.id AS cid, v.added_at AS added, c.start_sec AS ss
+              FROM video_chunks c JOIN videos v ON v.id = c.video_id
+             WHERE c.id IN ({placeholders})
+            """,
+            int_ids,
+        ).fetchall()
+        key = {int(r["cid"]): (r["added"] or "", float(r["ss"] or 0.0))
+               for r in rows}
+        sentinel = ("", 0.0) if reverse else ("~", 0.0)
+        return sorted(raw_ids,
+                      key=lambda rid: key.get(int(rid), sentinel),
+                      reverse=reverse)
 
     def _resolve_citation_labels(self, text: str) -> dict[str, str]:
         """Look up nicer display labels for every [msg:…]/[doc:…] in ``text``.
@@ -852,6 +922,34 @@ class ChatView(QWidget):
         # Blow the provider cache so the next ask() picks the new setting up
         aireg.reset_cache()
         self._refresh_chat_provider_buttons()
+
+    def _sources_sort_order(self) -> str:
+        """'newest' (default) or 'oldest'."""
+        raw = (dbmod.get_setting(self._conn, "sources_sort_order", "newest")
+               or "newest").strip().lower()
+        return "oldest" if raw == "oldest" else "newest"
+
+    def _toggle_sources_sort(self) -> None:
+        current = self._sources_sort_order()
+        new = "oldest" if current == "newest" else "newest"
+        dbmod.set_setting(self._conn, "sources_sort_order", new)
+        self._refresh_sort_toggle_label()
+        # Re-render the whole transcript so chip ordering updates in-place
+        # for all already-displayed answers.
+        self._rerender_transcript()
+
+    def _refresh_sort_toggle_label(self) -> None:
+        arrow = "↑" if self._sources_sort_order() == "newest" else "↓"
+        label = ("Sources: newest first" if self._sources_sort_order() == "newest"
+                 else "Sources: oldest first")
+        self._sort_toggle.setText(f"{arrow}  {label}")
+
+    def _rerender_transcript(self) -> None:
+        """Rebuild the whole transcript HTML from self._history so a UI
+        preference change (e.g. sources sort order) takes effect on past
+        answers too. Delegates to the existing _render_transcript path."""
+        if hasattr(self, "_transcript") and self._history:
+            self._render_transcript()
 
     def _refresh_chat_provider_buttons(self) -> None:
         current = (
