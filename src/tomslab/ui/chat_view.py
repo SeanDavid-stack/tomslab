@@ -488,10 +488,12 @@ class ChatView(QWidget):
                 out.append(html.escape(text[last_end:start]))
             kind, raw = m.group(1), m.group(2)
             href = f"{kind}:{raw}"
-            # Friendly label with fallback to short "msg"/"doc" if unresolved.
+            # Friendly label with fallback if the DB lookup missed.
             friendly = labels.get(href)
             if not friendly:
-                friendly = "msg" if kind == "msg" else "doc"
+                friendly = {"msg": "msg", "doc": "doc", "vid": "▶ video"}.get(
+                    kind, kind
+                )
             label = html.escape(friendly)
             out.append(
                 f'<a href="{html.escape(href)}" '
@@ -514,12 +516,15 @@ class ChatView(QWidget):
         """
         msg_ids: set[str] = set()
         doc_ids: set[str] = set()
+        vid_chunk_ids: set[str] = set()
         for m in CITATION_RE.finditer(text or ""):
             kind, raw = m.group(1), m.group(2)
             if kind == "msg":
                 msg_ids.add(raw)
             elif kind == "doc":
                 doc_ids.add(raw)
+            elif kind == "vid":
+                vid_chunk_ids.add(raw)
 
         out: dict[str, str] = {}
 
@@ -565,6 +570,34 @@ class ChatView(QWidget):
                     title = r["title"] or (r["fn"] or "doc")
                     title = _short_doc_title(title)
                     out[f"doc:{int(r['pid'])}"] = f"{title} · p{int(r['pnum'])}"
+
+        # ---- video chunks -----------------------------------------------
+        # Each vid:N citation resolves to "▶ 14:32 · <short title>" which
+        # hints at the timestamp. The actual youtube.com/...&t= URL is
+        # assembled in the click handler, not here.
+        if vid_chunk_ids:
+            try:
+                int_cids = [int(x) for x in vid_chunk_ids]
+            except ValueError:
+                int_cids = []
+            if int_cids:
+                placeholders = ",".join("?" * len(int_cids))
+                rows = self._conn.execute(
+                    f"""
+                    SELECT c.id AS cid, c.start_sec AS ss,
+                           v.title AS title
+                      FROM video_chunks c
+                      JOIN videos v ON v.id = c.video_id
+                     WHERE c.id IN ({placeholders})
+                    """,
+                    int_cids,
+                ).fetchall()
+                for r in rows:
+                    title = r["title"] or "Tom video"
+                    if len(title) > 30:
+                        title = title[:28] + "…"
+                    ts = _fmt_short_timestamp(float(r["ss"] or 0.0))
+                    out[f"vid:{int(r['cid'])}"] = f"▶ {ts} · {title}"
 
         return out
 
@@ -867,10 +900,31 @@ class ChatView(QWidget):
         if href.startswith("save:"):
             self._save_answer(href[len("save:"):])
             return
-        m = re.match(r"^(msg|doc):(.+)$", href)
+        m = re.match(r"^(msg|doc|vid):(.+)$", href)
         if not m:
             return
-        self.citation_clicked.emit(m.group(1), m.group(2))
+        kind, raw = m.group(1), m.group(2)
+        if kind == "vid":
+            # Resolve chunk_id → youtube URL with timestamp, open in browser.
+            try:
+                cid = int(raw)
+            except ValueError:
+                return
+            row = self._conn.execute(
+                """
+                SELECT v.url AS url, c.start_sec AS ss
+                  FROM video_chunks c JOIN videos v ON v.id = c.video_id
+                 WHERE c.id = ?
+                """,
+                (cid,),
+            ).fetchone()
+            if row is None:
+                return
+            import webbrowser
+            from tomslab.chat import _youtube_link
+            webbrowser.open(_youtube_link(row["url"] or "", float(row["ss"] or 0.0)))
+            return
+        self.citation_clicked.emit(kind, raw)
 
     def _save_answer(self, idx_str: str) -> None:
         try:
@@ -915,6 +969,15 @@ def _fmt_short_ts(iso_ts: str) -> str:
         return f"{_MONTHS_SHORT[m - 1]} {y}"
     except Exception:
         return iso_ts[:7]
+
+
+def _fmt_short_timestamp(sec: float) -> str:
+    """Seconds → 'H:MM:SS' or 'M:SS' depending on length. For compact
+    pills next to video citations."""
+    s = int(sec or 0)
+    h, rem = divmod(s, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
 def _short_doc_title(title: str) -> str:
