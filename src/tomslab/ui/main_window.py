@@ -1360,6 +1360,8 @@ class MainWindow(QMainWindow):
 
         The scan runs on a background QThread so the UI stays responsive
         even on huge folders / misclicks on D:\\ root."""
+        import logging as _lg
+        _lg.info("[import] handler entered")
         if self._video_worker is not None and self._video_worker.isRunning():
             QMessageBox.information(self, "Already running",
                                     "A video ingest is already in progress.")
@@ -1369,14 +1371,17 @@ class MainWindow(QMainWindow):
         from PyQt6.QtCore import QThread, pyqtSignal
 
         last = dbmod.get_setting(self._conn, "video_import_folder", "") or ""
+        _lg.info("[import] opening folder picker (default=%s)", last or "<none>")
         folder = QFileDialog.getExistingDirectory(
             self, "Select folder with Tom's video files", last,
         )
+        _lg.info("[import] picker returned: %s", folder or "<cancelled>")
         if not folder:
             return
 
         from pathlib import Path
         from tomslab.ingest.youtube import scan_folder_for_videos
+        _lg.info("[import] starting background scan worker for %s", folder)
 
         # Background scan with a modal "Scanning…" progress dialog. The
         # user can hit Cancel if they picked the wrong folder and don't
