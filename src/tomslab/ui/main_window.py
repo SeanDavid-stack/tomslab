@@ -8,6 +8,7 @@ Phase 1 gave us import + a plain list.  Phase 2 adds:
 from __future__ import annotations
 
 import html as _html
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -119,24 +120,34 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._refresh_status()
 
-        # First-run: show the Getting Started & Policy dialog once so
-        # new users see the expectation-setting + ToS-responsibility
-        # text before they start using the ingest features. Gated by a
-        # settings key so it doesn't nag on subsequent launches.
-        if dbmod.get_setting(self._conn, "first_run_policy_shown", "") != "yes":
+        # First-run: require an affirmative 'I agree' click on the full
+        # Disclaimer before the app is usable. Click-wrap > browse-wrap
+        # for enforceability. Gated by a settings key so it only fires
+        # the first time.
+        if dbmod.get_setting(self._conn, "disclaimer_accepted", "") != "yes":
             QTimer.singleShot(300, self._show_first_run_policy)
 
     def _show_first_run_policy(self) -> None:
         # Order on first launch:
-        #   1. Full Disclaimer & Legal — required-acknowledgement gate.
-        #      Shown on every launch until the user clicks OK; the
-        #      acknowledge flag carries forward so subsequent launches
-        #      skip straight past.
+        #   1. Full Disclaimer & Legal — required click-to-agree gate.
+        #      If the user declines, the app quits; without an affirmative
+        #      'I agree' click, nothing else runs.
         #   2. Getting Started & Policy — friendlier expectation-setting.
         #   3. First-run wizard, if the DB is empty.
-        self._show_disclaimer()
+        accepted = self._show_first_run_disclaimer()
+        if not accepted:
+            # User declined — close the app. Nothing in Tom's Lab runs
+            # without consent to the legal terms.
+            from PyQt6.QtWidgets import QApplication
+            self.close()
+            QApplication.quit()
+            return
+        dbmod.set_setting(self._conn, "disclaimer_accepted", "yes")
+        dbmod.set_setting(
+            self._conn, "disclaimer_accepted_at",
+            datetime.now(timezone.utc).isoformat(),
+        )
         self._show_getting_started()
-        dbmod.set_setting(self._conn, "first_run_policy_shown", "yes")
         from tomslab.ui.first_run_wizard import (
             FirstRunWizard,
             should_show as wizard_should_show,
@@ -146,6 +157,27 @@ class MainWindow(QMainWindow):
             wiz = FirstRunWizard(self)
             wiz.exec()
             wizard_mark_done(self._conn)
+
+    def _show_first_run_disclaimer(self) -> bool:
+        """First-launch click-to-agree gate. Returns True if the user
+        affirmatively accepts the Disclaimer & Legal terms — that's
+        what unlocks the app. Returns False on decline or close."""
+        box = QMessageBox(self)
+        box.setWindowTitle("Tom's Lab — Required: review & accept terms")
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setTextFormat(Qt.TextFormat.RichText)
+        box.setText(self._disclaimer_html())
+        accept = box.addButton(
+            "I have read and accept these terms",
+            QMessageBox.ButtonRole.AcceptRole,
+        )
+        decline = box.addButton(
+            "Decline and exit",
+            QMessageBox.ButtonRole.RejectRole,
+        )
+        box.setDefaultButton(decline)
+        box.exec()
+        return box.clickedButton() is accept
 
     # ------------------------------------------------------------------
     # palette
@@ -237,6 +269,10 @@ class MainWindow(QMainWindow):
         disclaimer_action = QAction("&Disclaimer / Legal", self)
         disclaimer_action.triggered.connect(self._show_disclaimer)
         help_menu.addAction(disclaimer_action)
+
+        privacy_action = QAction("&Privacy Policy", self)
+        privacy_action.triggered.connect(self._show_privacy_policy)
+        help_menu.addAction(privacy_action)
 
     # ------------------------------------------------------------------
     # main widgets
@@ -1516,6 +1552,14 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "Disclaimer & Legal",
+            self._disclaimer_html(),
+        )
+
+    def _disclaimer_html(self) -> str:
+        """Single source of truth for the Disclaimer & Legal text — used
+        by both the Help → Disclaimer dialog and the first-run click-to-
+        agree gate so the language stays in lock-step."""
+        return (
             "<h3>Independent third-party software — no connection to Tom, "
             "Bookmap, or Discord</h3>"
             "<p>Tom's Lab is an independent, third-party software application "
@@ -1627,13 +1671,119 @@ class MainWindow(QMainWindow):
             "for any disruption, cost, account suspension, or loss "
             "resulting from third-party service use.</p>"
 
+            "<h3>Governing law & jurisdiction</h3>"
+            "<p>These terms are governed by the laws of the "
+            "<b>State of Nevada, United States</b>, where the publisher "
+            "(SDE-Software / SDES.DEV) is legally resident. Any dispute "
+            "arising from or relating to this software shall be "
+            "resolved in a court of competent jurisdiction in Clark "
+            "County, Nevada. Users agree to this venue regardless of "
+            "their own physical location at the time of use.</p>"
+
+            "<h3>Privacy at a glance</h3>"
+            "<p>Tom's Lab stores all user data locally on the user's "
+            "own machine (SQLite database, log files, cached audio). "
+            "The publisher (SDE-Software) does <b>not</b> collect, "
+            "receive, or have access to anything the app stores. When "
+            "the user invokes a feature that calls a third-party service "
+            "(Google Gemini, Ollama on the user's own machine, YouTube, "
+            "Hugging Face, Discord), data flows between the user and "
+            "that service under its own terms — not through SDE-Software. "
+            "See Help → Privacy Policy for the full detail.</p>"
+
             "<h3>Attribution</h3>"
             "<p>Publisher: <b>SDE-Software (SDES.DEV)</b> — "
             "<a href='https://sdes.dev'>sdes.dev</a><br>"
             "© 2026 SDE-Software. All rights reserved.</p>"
 
-            "<p>By continuing to use Tom's Lab you agree that you "
-            "understand and accept the above.</p>"
+            "<p>By clicking 'I have read and accept these terms' or "
+            "by continuing to use Tom's Lab you agree that you "
+            "understand and accept the above in full.</p>"
+        )
+
+    def _show_privacy_policy(self) -> None:
+        """Explicit privacy-policy dialog. Tom's Lab has no telemetry,
+        no analytics, no cloud backend owned by the publisher. The
+        policy here exists to say that unambiguously and to list the
+        third-party services the user may route data to at their own
+        discretion."""
+        QMessageBox.information(
+            self, "Privacy Policy",
+            "<h3>Tom's Lab Privacy Policy</h3>"
+            "<p><i>Effective: 2026-04-19 · Publisher: "
+            "SDE-Software (SDES.DEV)</i></p>"
+
+            "<h4>Short version</h4>"
+            "<p>Tom's Lab runs entirely on your own computer. "
+            "<b>SDE-Software does not collect, receive, or have "
+            "access to anything you do in this app.</b> No telemetry, "
+            "no crash reports, no analytics, no cloud sync, no "
+            "user accounts.</p>"
+
+            "<h4>What the app stores locally</h4>"
+            "<ul>"
+            "<li><b>SQLite database</b> — Discord messages you import, "
+            "PDF pages, video transcripts, embeddings, your chat "
+            "history with Ask Tom, your bookmarks.</li>"
+            "<li><b>Log files</b> — ingest and runtime diagnostics.</li>"
+            "<li><b>Cached audio</b> — any videos you download or "
+            "drop into the folder-import path.</li>"
+            "<li><b>Settings</b> — your preferences, AI-provider "
+            "configuration, API keys (stored XOR-masked in the "
+            "local SQLite).</li>"
+            "</ul>"
+            "<p>All of this lives in the data directory you configured "
+            "(typically <code>D:\\Toms Lab\\data</code> via the "
+            "<code>TOMSLAB_DATA_DIR</code> environment variable). You "
+            "can delete it at any time.</p>"
+
+            "<h4>Third-party services you may route data through</h4>"
+            "<p>Several optional features transmit data to third-party "
+            "services <b>when and only when you invoke them</b>. That "
+            "data flow is governed by each provider's own terms and "
+            "privacy policies, not by SDE-Software:</p>"
+            "<ul>"
+            "<li><b>Google (Gemini API)</b> — when Gemini is the active "
+            "Ask Tom provider, your question + retrieved context + "
+            "attached charts are sent to Google. See "
+            "<a href='https://ai.google.dev/terms'>ai.google.dev/terms</a>."
+            "</li>"
+            "<li><b>Ollama</b> — runs locally on your own machine; "
+            "data does not leave your computer unless you explicitly "
+            "point Ollama at a remote host.</li>"
+            "<li><b>Hugging Face</b> — one-time download of the "
+            "faster-whisper model on first transcription run. No "
+            "ongoing transmission.</li>"
+            "<li><b>YouTube / Discord</b> — when you use the ingest "
+            "features with your signed-in browser cookies, the cookie "
+            "values authenticate your requests to those platforms. "
+            "SDE-Software never sees those cookies.</li>"
+            "</ul>"
+
+            "<h4>No tracking, no sharing, no sale</h4>"
+            "<p>SDE-Software does not track, log, aggregate, sell, "
+            "or share any user data. There is nothing to track — the "
+            "publisher has no server-side component that Tom's Lab "
+            "communicates with.</p>"
+
+            "<h4>Your rights</h4>"
+            "<p>Because no personal data is collected or retained by "
+            "SDE-Software, there is nothing to access, export, "
+            "rectify, or delete on our end. You own and control every "
+            "byte Tom's Lab produces, and you can delete any or all "
+            "of it by removing the data directory.</p>"
+
+            "<h4>Changes to this policy</h4>"
+            "<p>If the policy changes, the revised version will ship "
+            "with the next update of Tom's Lab and be accessible via "
+            "Help → Privacy Policy.</p>"
+
+            "<p><i>Questions about the policy itself (not about how to "
+            "use the app): "
+            "<a href='https://sdes.dev'>sdes.dev</a>. "
+            "As noted elsewhere, there is no user-support channel for "
+            "Tom's Lab — do not contact Tom, Bookmap, or the Bookmap "
+            "Discord about this program.</i></p>"
         )
 
     # ------------------------------------------------------------------
