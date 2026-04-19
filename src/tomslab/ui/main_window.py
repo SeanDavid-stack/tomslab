@@ -113,6 +113,17 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._refresh_status()
 
+        # First-run: show the Getting Started & Policy dialog once so
+        # new users see the expectation-setting + ToS-responsibility
+        # text before they start using the ingest features. Gated by a
+        # settings key so it doesn't nag on subsequent launches.
+        if dbmod.get_setting(self._conn, "first_run_policy_shown", "") != "yes":
+            QTimer.singleShot(300, self._show_first_run_policy)
+
+    def _show_first_run_policy(self) -> None:
+        self._show_getting_started()
+        dbmod.set_setting(self._conn, "first_run_policy_shown", "yes")
+
     # ------------------------------------------------------------------
     # palette
     # ------------------------------------------------------------------
@@ -186,6 +197,10 @@ class MainWindow(QMainWindow):
         file_menu.addAction(quit_action)
 
         help_menu = menu.addMenu("&Help")
+        getting_started_action = QAction("&Getting Started && Policy", self)
+        getting_started_action.triggered.connect(self._show_getting_started)
+        help_menu.addAction(getting_started_action)
+
         about_action = QAction("&About", self)
         about_action.triggered.connect(self._show_about)
         help_menu.addAction(about_action)
@@ -1243,6 +1258,60 @@ class MainWindow(QMainWindow):
             "Desktop study tool for the Bookmap Discord<br>"
             "<code>traders-lab-tom-b</code> channel.<br><br>"
             f"Database: <code>{database_path()}</code>",
+        )
+
+    def _show_getting_started(self) -> None:
+        """Frank expectations-setting dialog: what this is, what it isn't,
+        whose responsibility the upkeep + third-party-ToS risk is. Shown
+        via Help → Getting Started & Policy, and also auto-presented the
+        very first time the app launches (see first_run_check below)."""
+        QMessageBox.information(
+            self,
+            "Getting Started & Policy",
+            "<h3>Welcome to Tom's Lab</h3>"
+            "<p>A quick read before you dig in — this sets expectations "
+            "so nobody's surprised later.</p>"
+
+            "<h4>What this is</h4>"
+            "<p>A free, volunteer-built desktop study tool that makes "
+            "Tom B's publicly-shared teaching searchable. Built on an "
+            "as-needed basis by one person.</p>"
+
+            "<h4>What this isn't</h4>"
+            "<p>It is <b>not a commercial product</b>. There is no "
+            "customer support queue, no service-level agreement, no "
+            "guaranteed roadmap, and no release schedule. Bug fixes and "
+            "updates happen at the maintainer's discretion — they may "
+            "or may not ever happen. If something stops working, you "
+            "may need to wait or fix it yourself.</p>"
+
+            "<h4>Your responsibilities</h4>"
+            "<ul>"
+            "<li><b>Keep your own corpus current.</b> New Discord "
+            "exports, new YouTube videos, new PDFs — you import them "
+            "yourself when you want them indexed. The app does not "
+            "auto-fetch anything. The ingest workflows are documented "
+            "in Help and in the Getting Started guide.</li>"
+            "<li><b>Respect third-party Terms of Service.</b> "
+            "Bulk-exporting Discord messages and bulk-downloading "
+            "YouTube videos may violate those platforms' ToS. This app "
+            "provides the ingest mechanisms; <b>whether, how, and "
+            "how much you use them is your responsibility</b>, not "
+            "the maintainer's.</li>"
+            "<li><b>Verify every answer.</b> AI-generated output can "
+            "be wrong. This is an experimental research tool, not "
+            "financial advice. You alone are responsible for your "
+            "trading decisions.</li>"
+            "</ul>"
+
+            "<h4>Why this policy</h4>"
+            "<p>This is a free utility shared so that people interested "
+            "in Tom's framework have a useful tool. The choice is "
+            "between sharing it under these constraints or not sharing "
+            "it at all. The maintainer is happy to share under the "
+            "constraints above.</p>"
+
+            "<p><i>Thanks for reading — enjoy the app.</i></p>"
         )
 
     def _show_disclaimer(self) -> None:
