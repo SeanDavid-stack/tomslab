@@ -196,6 +196,12 @@ class MainWindow(QMainWindow):
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
 
+        study_menu = menu.addMenu("&Study")
+        daily_action = QAction("📚 &Today's concept", self)
+        daily_action.setShortcut(QKeySequence("Ctrl+D"))
+        daily_action.triggered.connect(self._on_daily_study)
+        study_menu.addAction(daily_action)
+
         help_menu = menu.addMenu("&Help")
         getting_started_action = QAction("&Getting Started && Policy", self)
         getting_started_action.triggered.connect(self._show_getting_started)
@@ -484,6 +490,32 @@ class MainWindow(QMainWindow):
             self._noise_toggle.setText("🔇 Hiding reactions")
         else:
             self._noise_toggle.setText("🔊 Showing everything")
+
+    def _on_daily_study(self) -> None:
+        """Pick (or recall) today's random concept and open its evolution
+        timeline. Same calendar day keeps showing the same concept; next
+        calendar day rolls a new one. Weighted by Discord mention count
+        with a 7-day no-repeat window."""
+        from tomslab import daily_study
+        concept = daily_study.last_picked_today(self._conn)
+        if concept is None:
+            concept = daily_study.pick_concept(self._conn)
+        if not concept:
+            QMessageBox.information(
+                self, "Nothing to study yet",
+                "Tom's glossary is empty — ingest Tom's reference PDFs "
+                "first so we have concepts to pick from.",
+            )
+            return
+        from tomslab.ui.evolution_dialog import EvolutionDialog
+        dlg = EvolutionDialog(
+            self._conn,
+            concept,
+            on_citation_clicked=self._jump_to_message_citation,
+            parent=self,
+        )
+        dlg.setWindowTitle(f"Today's Tom study — {concept}")
+        dlg.exec()
 
     def _on_evolution_requested(self, term: str) -> None:
         """Right-click on a concept chip → dedicated timeline dialog
