@@ -376,7 +376,7 @@ class ChatView(QWidget):
         button_col.addWidget(self._attach_btn)
 
         self._send_btn = QPushButton("Ask")
-        self._send_btn.clicked.connect(self._on_send)
+        self._send_btn.clicked.connect(self._on_send_or_cancel)
         self._send_btn.setStyleSheet(
             f"QPushButton {{ background: {COLOR_PRIMARY}; color: white;"
             f" padding: 10px 22px; border: none; border-radius: 8px;"
@@ -900,10 +900,61 @@ class ChatView(QWidget):
         self._set_busy(False)
         self._status.setText("Ready · Ctrl+Enter to send")
 
+    _SEND_STYLE = (
+        "QPushButton { background: #5865F2; color: white;"
+        " padding: 10px 22px; border: none; border-radius: 8px;"
+        " font-weight: 600; font-size: 13px; }"
+        "QPushButton:hover { background: #4752C4; }"
+    )
+    _CANCEL_STYLE = (
+        "QPushButton { background: #ED4245; color: white;"
+        " padding: 10px 22px; border: none; border-radius: 8px;"
+        " font-weight: 600; font-size: 13px; }"
+        "QPushButton:hover { background: #F04747; }"
+    )
+
     def _set_busy(self, busy: bool) -> None:
-        self._send_btn.setEnabled(not busy)
-        self._send_btn.setText("Thinking…" if busy else "Ask")
+        """While busy, the Ask button becomes a red 'Cancel' that aborts
+        the in-flight request — essential for when the local model is
+        stuck and the user doesn't want to kill the whole app."""
+        if busy:
+            self._send_btn.setEnabled(True)
+            self._send_btn.setText("✕  Cancel")
+            self._send_btn.setStyleSheet(self._CANCEL_STYLE)
+        else:
+            self._send_btn.setEnabled(True)
+            self._send_btn.setText("Ask")
+            self._send_btn.setStyleSheet(self._SEND_STYLE)
         self._input.setReadOnly(busy)
+
+    def _on_send_or_cancel(self) -> None:
+        """One button, two modes: sends a new question when idle, cancels
+        the in-flight worker when busy."""
+        if self._worker is not None and self._worker.isRunning():
+            self._cancel_worker()
+            return
+        self._on_send()
+
+    def _cancel_worker(self) -> None:
+        """Terminate the in-flight chat request. Uses terminate() rather
+        than quit() because a hung provider call won't check the
+        interruption flag — only a hard kill breaks the wait."""
+        if self._worker is None:
+            return
+        self._think_timer.stop()
+        try:
+            self._worker.quit()
+            self._worker.wait(500)
+            if self._worker.isRunning():
+                self._worker.terminate()
+                self._worker.wait(500)
+        except Exception:
+            pass
+        self._worker = None
+        self._set_busy(False)
+        self._status.setText(
+            "✕ Cancelled — try switching to Gemini (cloud) if Ollama keeps hanging"
+        )
 
     def clear_history(self) -> None:
         self._history = []
