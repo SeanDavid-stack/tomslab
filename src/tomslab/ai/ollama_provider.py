@@ -15,15 +15,41 @@ _ollama = None
 
 
 def _ensure_ollama_loaded():
+    """Import the ollama Python package with a hard timeout. Some systems
+    hang indefinitely inside `import ollama` (antivirus scan, DLL loader
+    deadlock, GPU-driver bad state). Without a timeout that hang shows
+    up in the UI as 'Thinking…' forever with no error. Better to fail
+    visibly so the user knows to reboot or switch providers."""
     global _ollama
     if _ollama is not None:
         return _ollama
-    try:
-        import ollama as o
-        _ollama = o
-        return _ollama
-    except ImportError:
-        raise ProviderUnavailable("ollama python package not installed")
+
+    import threading
+    result = {}
+
+    def _do_import():
+        try:
+            import ollama as o
+            result["mod"] = o
+        except Exception as exc:
+            result["err"] = exc
+
+    t = threading.Thread(target=_do_import, daemon=True)
+    t.start()
+    t.join(timeout=10.0)
+    if t.is_alive():
+        raise ProviderUnavailable(
+            "The `ollama` Python package is hanging on import. This usually "
+            "means a stuck antivirus scan, a Windows DLL-loader deadlock, or "
+            "CUDA driver in a bad state. Try: (1) reboot the machine, "
+            "(2) switch Ask Tom to Gemini (cloud) for now."
+        )
+    if "err" in result:
+        raise ProviderUnavailable(
+            f"ollama python package failed to import: {result['err']}"
+        )
+    _ollama = result["mod"]
+    return _ollama
 
 
 DEFAULT_EMBED_MODEL = "nomic-embed-text"

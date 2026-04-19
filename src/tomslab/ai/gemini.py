@@ -23,18 +23,45 @@ genai_types = None
 
 
 def _ensure_genai_loaded() -> None:
+    """Import google-genai with a hard timeout. Same rationale as the
+    Ollama version: an on-import cert / credential probe can hang
+    forever under antivirus / DLL-loader pressure, and without a
+    timeout the user sees 'Thinking…' with no error ever surfacing."""
     global genai, genai_errors, genai_types
     if genai is not None:
         return
-    try:
-        from google import genai as _genai
-        from google.genai import errors as _genai_errors
-        from google.genai import types as _genai_types
-    except ImportError:
-        raise ProviderUnavailable("google-genai package not installed")
-    genai = _genai
-    genai_errors = _genai_errors
-    genai_types = _genai_types
+
+    import threading
+    result = {}
+
+    def _do_import():
+        try:
+            from google import genai as _genai
+            from google.genai import errors as _genai_errors
+            from google.genai import types as _genai_types
+            result["genai"] = _genai
+            result["errors"] = _genai_errors
+            result["types"] = _genai_types
+        except Exception as exc:
+            result["err"] = exc
+
+    t = threading.Thread(target=_do_import, daemon=True)
+    t.start()
+    t.join(timeout=10.0)
+    if t.is_alive():
+        raise ProviderUnavailable(
+            "The `google-genai` Python package is hanging on import. "
+            "This usually means a stuck antivirus scan or a Windows "
+            "DLL-loader deadlock. Try: (1) reboot the machine, "
+            "(2) switch Ask Tom to Ollama (local) for now."
+        )
+    if "err" in result:
+        raise ProviderUnavailable(
+            f"google-genai failed to import: {result['err']}"
+        )
+    genai = result["genai"]
+    genai_errors = result["errors"]
+    genai_types = result["types"]
 
 
 DEFAULT_EMBED_MODEL = "gemini-embedding-001"
