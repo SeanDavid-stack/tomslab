@@ -127,11 +127,16 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(300, self._show_first_run_policy)
 
     def _show_first_run_policy(self) -> None:
+        # Order on first launch:
+        #   1. Full Disclaimer & Legal — required-acknowledgement gate.
+        #      Shown on every launch until the user clicks OK; the
+        #      acknowledge flag carries forward so subsequent launches
+        #      skip straight past.
+        #   2. Getting Started & Policy — friendlier expectation-setting.
+        #   3. First-run wizard, if the DB is empty.
+        self._show_disclaimer()
         self._show_getting_started()
         dbmod.set_setting(self._conn, "first_run_policy_shown", "yes")
-        # After the policy prompt, if the DB is empty, walk new users
-        # through the ingest sources with the setup wizard. Gated so
-        # existing users with a populated DB don't see it.
         from tomslab.ui.first_run_wizard import (
             FirstRunWizard,
             should_show as wizard_should_show,
@@ -140,8 +145,6 @@ class MainWindow(QMainWindow):
         if wizard_should_show(self._conn):
             wiz = FirstRunWizard(self)
             wiz.exec()
-            # Mark done regardless of accept/reject — skipping still
-            # counts as 'user has seen this, don't nag'.
             wizard_mark_done(self._conn)
 
     # ------------------------------------------------------------------
@@ -1513,27 +1516,57 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "Disclaimer & Legal",
-            "<h3>Independent third-party software</h3>"
+            "<h3>Independent third-party software — no connection to Tom, "
+            "Bookmap, or Discord</h3>"
             "<p>Tom's Lab is an independent, third-party software application "
-            "developed by <b>SDE-Software (SDES.DEV)</b>. It is not "
-            "affiliated with, endorsed by, sponsored by, or in any way "
-            "connected to Bookmap Ltd., Tom B, the Bookmap Discord channels, "
-            "Google, Ollama, or Hugging Face, or any of their parent "
-            "companies, subsidiaries, licensors, or affiliated entities. "
-            "Bookmap™ is a trademark of Bookmap Ltd. and is referenced here "
-            "solely to describe subject-matter context.</p>"
+            "developed by <b>SDE-Software (SDES.DEV)</b>.</p>"
+            "<p><b>You are NOT asking Tom B.</b> Ask Tom is an AI model "
+            "reading Tom's publicly-shared Discord posts, PDFs, and "
+            "YouTube transcripts and synthesising an answer. <b>Tom B has "
+            "no involvement with this app.</b> He has not built it, "
+            "reviewed it, endorsed it, or approved it in any way. "
+            "Answers can be wrong, out of date, or misleading.</p>"
+            "<p>Tom's Lab is <b>not affiliated with, endorsed by, "
+            "sponsored by, or in any way connected to any of</b>:</p>"
+            "<ul>"
+            "<li><b>Tom B</b> (the trader whose public content is "
+            "referenced here)</li>"
+            "<li><b>Bookmap Ltd.</b> or any Bookmap subsidiary or "
+            "affiliate</li>"
+            "<li><b>The Bookmap Discord server</b>, its moderators, or "
+            "the Bookmap Discord support team</li>"
+            "<li><b>Discord Inc.</b> or Discord's own support</li>"
+            "<li><b>Google, Ollama, Hugging Face, YouTube</b>, or any "
+            "third-party AI / hosting provider referenced elsewhere in "
+            "the app</li>"
+            "</ul>"
+            "<p><b>None of the entities above will provide support, "
+            "troubleshooting, guidance, or recommendations for Tom's "
+            "Lab in any form — ever.</b> Please do not contact them "
+            "about it. They have nothing to do with this program.</p>"
+            "<p>Bookmap™ is a trademark of Bookmap Ltd. and is "
+            "referenced here solely to describe subject-matter "
+            "context.</p>"
 
             "<h3>Experimental research tool</h3>"
-            "<p><b>Tom's Lab is not a trading platform, broker, or advisor.</b> "
-            "Everything this app produces — Ask Tom answers, chart analyses, "
-            "citations, similar-chart suggestions, entry / stop / target "
-            "ideas — is experimental output from AI models operating on "
-            "publicly-shared Discord messages, reference documents, and "
-            "YouTube transcripts. It is NOT financial advice, NOT a trade "
-            "recommendation, and NOT a substitute for your own analysis, "
-            "due diligence, or the advice of a licensed professional.</p>"
-            "<p><b>You alone are responsible for your trading decisions and "
-            "for any gains or losses that result from them.</b></p>"
+            "<p><b>Tom's Lab is not a trading platform, broker, or "
+            "advisor.</b> Everything this app produces — Ask Tom answers, "
+            "chart analyses, citations, similar-chart suggestions, "
+            "entry / stop / target ideas — is experimental output from "
+            "AI models operating on publicly-shared Discord messages, "
+            "reference documents, and YouTube transcripts. It is NOT "
+            "financial advice, NOT a trade recommendation, and NOT a "
+            "substitute for your own analysis, due diligence, or the "
+            "advice of a licensed professional.</p>"
+            "<p><b>Nothing Ask Tom outputs is Tom B's advice or Tom B's "
+            "recommendation.</b> Ask Tom is an AI model restating and "
+            "re-mixing content Tom posted publicly in the past. It may "
+            "contradict Tom's current thinking, misread his context, "
+            "stitch unrelated posts together, or invent plausible-"
+            "sounding detail. Tom is not responsible for what Tom's Lab "
+            "produces in his name.</p>"
+            "<p><b>You alone are responsible for your trading decisions "
+            "and for any gains or losses that result from them.</b></p>"
             "<ul>"
             "<li>Vet every citation against the original source before "
             "acting on it. Models can misread charts, mis-cite messages, "
@@ -1547,19 +1580,30 @@ class MainWindow(QMainWindow):
             "of future results.</li>"
             "</ul>"
 
-            "<h3>Provided as-is — no support</h3>"
+            "<h3>Provided as-is — no support from anyone</h3>"
             "<p>Tom's Lab is provided <b>as-is</b> and <b>used entirely at "
             "the user's own risk</b>. No warranty is made as to accuracy, "
             "completeness, or fitness for purpose.</p>"
-            "<p><b>No support, walkthroughs, troubleshooting, or individual "
-            "assistance is provided by SDE-Software, Bookmap, Tom B, or "
-            "the Bookmap Discord channels for this program.</b> Users are "
-            "responsible for reading the in-app Getting Started & Policy "
-            "dialog, for managing their own corpus (Discord exports, "
-            "YouTube videos, PDFs), and for respecting all third-party "
-            "Terms of Service when using the ingest features. Bugs and "
-            "glitches will be addressed as they are identified; no "
-            "service-level agreement is offered.</p>"
+            "<p><b>No support, walkthroughs, troubleshooting, guidance, "
+            "or recommendations of any kind will be provided by:</b></p>"
+            "<ul>"
+            "<li>SDE-Software / SDES.DEV (the publisher)</li>"
+            "<li>Tom B</li>"
+            "<li>Bookmap Ltd. or Bookmap's support team</li>"
+            "<li>The Bookmap Discord server, its moderators, or Bookmap "
+            "Discord support</li>"
+            "<li>Discord Inc. or Discord's own support</li>"
+            "</ul>"
+            "<p>If something in Tom's Lab doesn't work, <b>please do not "
+            "contact Tom, Bookmap, or the Bookmap Discord about it</b> — "
+            "they have nothing to do with this app and cannot help. "
+            "Users are responsible for reading the in-app Getting "
+            "Started & Policy dialog, for managing their own corpus "
+            "(Discord exports, YouTube videos, PDFs), and for respecting "
+            "all third-party Terms of Service when using the ingest "
+            "features. Bugs may be addressed by the publisher at their "
+            "discretion; no service-level agreement is offered and no "
+            "commitment to fix, respond, or update is made.</p>"
 
             "<h3>Limitation of liability</h3>"
             "<p>THE SOFTWARE IS PROVIDED \"AS IS\" WITHOUT WARRANTY OF ANY "
