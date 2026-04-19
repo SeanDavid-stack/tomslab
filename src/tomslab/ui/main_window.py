@@ -7,7 +7,12 @@ Phase 1 gave us import + a plain list.  Phase 2 adds:
 """
 from __future__ import annotations
 
+import html as _html
 from pathlib import Path
+
+
+def _escape_html(s: str) -> str:
+    return _html.escape(s or "")
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import (
@@ -1179,8 +1184,54 @@ class MainWindow(QMainWindow):
     def _on_video_failed(self, err: str) -> None:
         self._progress_bar.setVisible(False)
         self._video_worker = None
-        QMessageBox.critical(self, "TomTube ingest failed", err)
+        self._show_tomtube_off_ramp(err)
         self._refresh_status()
+
+    def _show_tomtube_off_ramp(self, err: str) -> None:
+        """Rich failure dialog for the direct-YouTube path. When yt-dlp
+        blows up on rate limits, bot-gate, or cookie expiry — which is
+        frequent because the whole stack fights YouTube's anti-bot
+        system — surface the reliable folder-import alternative
+        prominently so the user's next move is obvious."""
+        err_short = (err or "").strip()
+        if len(err_short) > 600:
+            err_short = err_short[:597] + "…"
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("TomTube direct-download failed")
+        box.setTextFormat(Qt.TextFormat.RichText)
+        box.setText(
+            "<h3>The experimental direct-YouTube path hit an error</h3>"
+            "<p>YouTube actively fights third-party downloaders and the "
+            "pipeline breaks regularly — cookie sessions expire, the "
+            "bot-gate tightens, PO-token scripts lag new player JS. "
+            "This is <b>expected</b>, not a Tom's Lab bug.</p>"
+            f"<p style='color:#949BA4; font-family: Consolas, monospace;'>"
+            f"{_escape_html(err_short)}</p>"
+            "<h3>What to do</h3>"
+            "<p><b>Use the folder-import path instead — it never "
+            "breaks.</b></p>"
+            "<ol>"
+            "<li>Download the videos you want with any tool that works "
+            "today (JDownloader, 4K Video Downloader, yt-dlp CLI, "
+            "browser extension)</li>"
+            "<li>Drop the audio / video files into a folder</li>"
+            "<li>In Tom's Lab: <b>File → Import videos from folder…</b>"
+            "</li>"
+            "</ol>"
+            "<p>Filenames containing the 11-char YouTube id "
+            "(<code>Title [abcdef12345].mp3</code>) preserve the deep-"
+            "link to <code>youtube.com/watch?v=…&amp;t=…</code> on every "
+            "citation. This is how the maintainer actually runs it.</p>"
+        )
+        use_folder = box.addButton(
+            "📁 Open folder-import now",
+            QMessageBox.ButtonRole.AcceptRole,
+        )
+        box.addButton("Close", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is use_folder:
+            self._on_import_video_folder()
 
     # ---- Folder-based video import (reliable path) --------------------
     def _on_import_video_folder(self) -> None:
