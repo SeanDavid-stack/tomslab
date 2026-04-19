@@ -16,12 +16,24 @@ from tomslab import secret_store
 
 log = logging.getLogger(__name__)
 
-try:
-    from google import genai
-    from google.genai import types as genai_types
-except ImportError:  # pragma: no cover
-    genai = None
-    genai_types = None
+# Lazy — see note in tomslab/ai/gemini.py. google-genai can hang on
+# its first import on some systems; loading it at module top blocks
+# the entire app from launching.
+genai = None
+genai_types = None
+
+
+def _ensure_genai() -> None:
+    global genai, genai_types
+    if genai is not None:
+        return
+    try:
+        from google import genai as _genai
+        from google.genai import types as _types
+        genai = _genai
+        genai_types = _types
+    except ImportError:
+        pass
 
 
 GLOSSARY_FILENAMES = ("Trader_Lab_Glossary.pdf",)

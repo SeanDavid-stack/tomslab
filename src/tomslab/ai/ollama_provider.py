@@ -7,10 +7,23 @@ from tomslab.ai.base import AIProvider, ProviderError, ProviderUnavailable
 
 log = logging.getLogger(__name__)
 
-try:
-    import ollama as _ollama
-except ImportError:  # pragma: no cover — ollama is required in requirements.txt
-    _ollama = None
+# Lazy — `import ollama` has been observed to hang on some systems
+# (likely probing the Ollama daemon at module load). Defer until a
+# provider instance is actually created so the app can launch even
+# when ollama-daemon is offline.
+_ollama = None
+
+
+def _ensure_ollama_loaded():
+    global _ollama
+    if _ollama is not None:
+        return _ollama
+    try:
+        import ollama as o
+        _ollama = o
+        return _ollama
+    except ImportError:
+        raise ProviderUnavailable("ollama python package not installed")
 
 
 DEFAULT_EMBED_MODEL = "nomic-embed-text"
@@ -29,8 +42,7 @@ class OllamaProvider(AIProvider):
         vision_model: str = DEFAULT_VISION_MODEL,
         chat_timeout: float = 180.0,
     ) -> None:
-        if _ollama is None:
-            raise ProviderUnavailable("ollama python package not installed")
+        _ensure_ollama_loaded()
         # Ollama client takes an optional timeout via httpx — pass through so
         # a hung local call fails cleanly instead of spinning forever.
         if host:

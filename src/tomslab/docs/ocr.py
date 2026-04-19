@@ -19,14 +19,26 @@ from tomslab import db as dbmod, secret_store
 
 log = logging.getLogger(__name__)
 
-try:
-    from google import genai
-    from google.genai import errors as genai_errors
-    from google.genai import types as genai_types
-except ImportError:  # pragma: no cover
-    genai = None
-    genai_types = None
-    genai_errors = None
+# Lazy — google-genai hangs on import on some systems (cert / metadata
+# probe); we only need it when OCR is actually invoked, not at app load.
+genai = None
+genai_errors = None
+genai_types = None
+
+
+def _ensure_genai() -> None:
+    global genai, genai_errors, genai_types
+    if genai is not None:
+        return
+    try:
+        from google import genai as _genai
+        from google.genai import errors as _err
+        from google.genai import types as _types
+        genai = _genai
+        genai_errors = _err
+        genai_types = _types
+    except ImportError:
+        pass
 
 try:
     import ollama as _ollama

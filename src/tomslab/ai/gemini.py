@@ -13,12 +13,28 @@ from tomslab.ai.base import AIProvider, ProviderError, ProviderUnavailable  # no
 
 log = logging.getLogger(__name__)
 
-try:
-    from google import genai
-    from google.genai import errors as genai_errors
-    from google.genai import types as genai_types
-except ImportError:  # pragma: no cover
-    genai = None
+# Lazy imports. The google-genai package has been observed to hang on
+# import in some environments (first-time certificate / metadata probe
+# on the main thread). Deferring until an instance is actually created
+# means the app can launch even when Gemini can't reach google.com.
+genai = None
+genai_errors = None
+genai_types = None
+
+
+def _ensure_genai_loaded() -> None:
+    global genai, genai_errors, genai_types
+    if genai is not None:
+        return
+    try:
+        from google import genai as _genai
+        from google.genai import errors as _genai_errors
+        from google.genai import types as _genai_types
+    except ImportError:
+        raise ProviderUnavailable("google-genai package not installed")
+    genai = _genai
+    genai_errors = _genai_errors
+    genai_types = _genai_types
 
 
 DEFAULT_EMBED_MODEL = "gemini-embedding-001"
@@ -34,8 +50,7 @@ class GeminiProvider(AIProvider):
         embed_model: str = DEFAULT_EMBED_MODEL,
         chat_model: str = DEFAULT_CHAT_MODEL,
     ) -> None:
-        if genai is None:
-            raise ProviderUnavailable("google-genai package not installed")
+        _ensure_genai_loaded()
         if not api_key:
             raise ProviderUnavailable("no Gemini API key configured")
         self._client = genai.Client(api_key=api_key)
