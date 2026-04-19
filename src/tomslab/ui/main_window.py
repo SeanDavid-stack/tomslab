@@ -128,6 +128,20 @@ class MainWindow(QMainWindow):
     def _show_first_run_policy(self) -> None:
         self._show_getting_started()
         dbmod.set_setting(self._conn, "first_run_policy_shown", "yes")
+        # After the policy prompt, if the DB is empty, walk new users
+        # through the ingest sources with the setup wizard. Gated so
+        # existing users with a populated DB don't see it.
+        from tomslab.ui.first_run_wizard import (
+            FirstRunWizard,
+            should_show as wizard_should_show,
+            mark_done as wizard_mark_done,
+        )
+        if wizard_should_show(self._conn):
+            wiz = FirstRunWizard(self)
+            wiz.exec()
+            # Mark done regardless of accept/reject — skipping still
+            # counts as 'user has seen this, don't nag'.
+            wizard_mark_done(self._conn)
 
     # ------------------------------------------------------------------
     # palette
