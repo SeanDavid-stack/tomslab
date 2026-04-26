@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tomslab"
-version = "0.1.0"
+version = "1.0.0"
 description = "Desktop app to search and study the Bookmap Discord 'traders-lab-tom-b' channel via AI."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -12,7 +12,7 @@ requires-python = ">=3.11"
 authors = [{ name = "Tom's Lab contributors" }]
 keywords = ["discord", "trading", "bookmap", "rag", "pyqt6"]
 classifiers = [
-    "Development Status :: 2 - Pre-Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Environment :: X11 Applications :: Qt",
     "Intended Audience :: End Users/Desktop",
     "Operating System :: Microsoft :: Windows",

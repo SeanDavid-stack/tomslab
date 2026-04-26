@@ -2,7 +2,7 @@
 
 **A free desktop research tool for going deeper into Tom B's publicly-shared trading material — a searchable library of what already exists, not a course that teaches it.**
 
-*Published by SDE-Software (SDES.DEV) — version 0.1.0, April 2026.*
+*Published by SDE-Software (SDES.DEV) — version 1.0.0, April 2026.*
 
 ---
 

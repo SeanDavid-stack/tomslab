@@ -1,4 +1,4 @@
-# Discord announcement — Tom's Lab v0.1.0
+# Discord announcement — Tom's Lab v1.0.0
 
 *Drafted by SDE-Software, April 2026. Edit before posting if Tom prefers different wording.*
 
@@ -20,7 +20,9 @@
 > - **Bulk-exporting Discord messages and bulk-downloading YouTube content may violate those platforms' Terms of Service. Importing your own export and your own video downloads is your decision and your responsibility.**
 > - **AI answers can be wrong. Verify everything against the original source before relying on it.** This is an experimental research tool, not financial advice. All trading decisions are yours.
 >
-> Download + manual: *[your Google Drive / GitHub link here]*
+> 📦 **Download + install instructions:** https://github.com/SeanDavid-stack/tomslab/releases/tag/v1.0.0
+>
+> *(The release page links to the installer and the data pack — data pack is hosted on Google Drive because it's 10.5 GB. The release notes have the install steps.)*
 
 ---
 
@@ -58,9 +60,9 @@ It runs entirely on your machine. Nothing phones home, no account required, no t
 
 ### How to install
 
-*[Download links — Google Drive folder containing `TomsLab-Setup-0.1.0.exe` and the data pack `.tar.zst`]*
+*[Download links — Google Drive folder containing `TomsLab-Setup-1.0.0.exe` and the data pack `.tar.zst`]*
 
-1. Download the installer (`TomsLab-Setup-0.1.0.exe`) and the data pack (`.tar.zst`).
+1. Download the installer (`TomsLab-Setup-1.0.0.exe`) and the data pack (`.tar.zst`).
 2. Run the installer. SmartScreen will warn — click **More info → Run anyway** if you accept the risk.
 3. Launch Tom's Lab.
 4. **File → Install data pack…** and pick the downloaded `.tar.zst`.

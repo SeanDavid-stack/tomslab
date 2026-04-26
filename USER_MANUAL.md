@@ -98,10 +98,10 @@ available at any time under **Help → Disclaimer & Legal**.
 
 ### 3.1 Install the application
 
-v0.1.0 ships as an **Inno Setup installer** — a single
-`TomsLab-Setup-0.1.0.exe`.
+v1.0.0 ships as an **Inno Setup installer** — a single
+`TomsLab-Setup-1.0.0.exe`.
 
-1. Download `TomsLab-Setup-0.1.0.exe` from the Google Drive link in
+1. Download `TomsLab-Setup-1.0.0.exe` from the Google Drive link in
    the GitHub release notes.
 2. Double-click the installer. Approve the UAC prompt.
 3. Follow the prompts — pick an install location (default

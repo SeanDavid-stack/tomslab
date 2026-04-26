@@ -58,8 +58,8 @@ SDE-Software's **BMBridge Lite**.
 
 ## Status
 
-**v0.1.0 — public release**. Ships as an Inno Setup installer
-(`TomsLab-Setup-0.1.0.exe`) on the project's release page. Not
+**v1.0.0 — public release**. Ships as an Inno Setup installer
+(`TomsLab-Setup-1.0.0.exe`) on the project's release page. Not
 Authenticode-signed; SmartScreen will warn on first launch — see
 [`USER_MANUAL.md`](USER_MANUAL.md) §3.1.
 
@@ -194,7 +194,7 @@ pip install -r requirements.txt
 python -m tomslab
 ```
 
-A window titled "Tom's Lab v0.1.0" should appear.
+A window titled "Tom's Lab v1.0.0" should appear.
 
 ## Project layout
 

@@ -1,7 +1,7 @@
 # Tom's Lab — what it does today
 
 *A free desktop study tool published by **SDE-Software (SDES.DEV)**.*
-*Version shown: 0.1.0 · Date: April 2026*
+*Version shown: 1.0.0 · Date: April 2026*
 
 ---
 
