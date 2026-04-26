@@ -119,6 +119,12 @@ class MainWindow(QMainWindow):
         self._youtube_check_worker: YouTubeCheckWorker | None = None
         self._keepalive_worker = None   # tomslab.ingest.youtube_keepalive.KeepAliveWorker
         self._update_thread = None      # tomslab.ui.update_dialog.UpdateCheckThread
+        # Data-pack install runs the SHA-256 verify + 25-30 GB extract on
+        # a QThread so the UI never freezes during a multi-minute install.
+        self._datapack_worker = None
+        # Held during install: read at finished_ok-time to populate the
+        # success summary that includes release version + date.
+        self._pending_pack_manifest = None
 
         self._search_debounce = QTimer(self)
         self._search_debounce.setSingleShot(True)
@@ -1402,7 +1408,7 @@ class MainWindow(QMainWindow):
         refuse-on-busy because it closes the DB and renames data/."""
         for w in (self._worker, self._embed_worker, self._image_embed_worker,
                   self._chart_classifier_worker, self._video_worker,
-                  self._youtube_check_worker):
+                  self._youtube_check_worker, self._datapack_worker):
             if w is not None and w.isRunning():
                 return True
         return False
@@ -1475,49 +1481,60 @@ class MainWindow(QMainWindow):
         self._progress_bar.setVisible(True)
         self._progress_bar.setRange(0, 0)
         self._status_label.setText("Installing data pack…")
-        QApplication.processEvents()
+        # Stash the manifest so the success slot can build a summary
+        # with version + release date even though the worker only
+        # returns InstallResult.
+        self._pending_pack_manifest = manifest
 
+        # Kick off the install on a worker thread so the UI keeps
+        # painting throughout. Slots fire back on the main thread.
+        from tomslab.ui.data_pack_install_worker import DataPackInstallWorker
+        self._datapack_worker = DataPackInstallWorker(pack_path, parent=self)
+        self._datapack_worker.progress.connect(self._on_install_progress)
+        self._datapack_worker.finished_ok.connect(self._on_install_finished)
+        self._datapack_worker.failed.connect(self._on_install_failed)
+        self._datapack_worker.start()
+
+    # ---- install worker slots ----------------------------------------
+    def _on_install_progress(self, _done: int, _total: int, status: str) -> None:
+        """Worker emits progress on the main thread via Qt's queued
+        connection; just update the status label. The progress bar is
+        already in indeterminate mode (range 0,0)."""
+        self._status_label.setText(status)
+
+    def _on_install_failed(self, error_class: str, message: str) -> None:
+        """Worker hit an exception. Re-open the DB connection (closed
+        before the worker started) and surface the error. Pre-flight
+        failures (IncompatibleAppVersion, PackHashMismatch) get a
+        warning dialog because nothing was renamed; mid-extract
+        failures get a critical dialog noting the data was restored."""
+        self._progress_bar.setVisible(False)
         try:
-            def _pg(done: int, total: int, status: str) -> None:
-                self._status_label.setText(status)
-                QApplication.processEvents()
-            result = dp.install_pack(pack_path, progress=_pg)
-        except (dp.IncompatibleAppVersion, dp.PackHashMismatch) as exc:
-            # Pre-flight failures — nothing was renamed or extracted, so
-            # skip the "data was restored" line that applies only to
-            # post-extract failures.
-            self._progress_bar.setVisible(False)
-            try:
-                self._conn = dbmod.connect()
-                dbmod.initialise(self._conn)
-                self._propagate_new_conn()
-            except Exception:
-                pass
-            title = ("App update required"
-                     if isinstance(exc, dp.IncompatibleAppVersion)
-                     else "Download verification failed")
-            QMessageBox.warning(self, title, str(exc))
-            self._refresh_status()
-            return
-        except Exception as exc:
-            self._progress_bar.setVisible(False)
+            self._conn = dbmod.connect()
+            dbmod.initialise(self._conn)
+            self._propagate_new_conn()
+        except Exception:
+            pass
+        if error_class == "IncompatibleAppVersion":
+            QMessageBox.warning(self, "App update required", message)
+        elif error_class == "PackHashMismatch":
+            QMessageBox.warning(self, "Download verification failed", message)
+        else:
             QMessageBox.critical(
                 self, "Install failed",
-                f"{type(exc).__name__}: {exc}\n\n"
+                f"{error_class}: {message}\n\n"
                 "Your existing data was restored from the backup."
             )
-            # Re-open the connection we closed above so the rest of the
-            # session keeps working against the untouched old DB.
-            try:
-                self._conn = dbmod.connect()
-                dbmod.initialise(self._conn)
-                self._propagate_new_conn()
-            except Exception:
-                pass
-            self._refresh_status()
-            return
+        self._pending_pack_manifest = None
+        self._refresh_status()
 
-        # Re-open against the freshly-installed DB and refresh every view.
+    def _on_install_finished(self, result) -> None:  # InstallResult
+        """Worker succeeded. Re-open against the freshly-installed DB,
+        invalidate every in-memory cache, refresh every tab, surface a
+        summary."""
+        manifest = self._pending_pack_manifest
+        self._pending_pack_manifest = None
+
         self._conn = dbmod.connect()
         dbmod.initialise(self._conn)
         self._propagate_new_conn()

@@ -196,7 +196,12 @@ def _extract_pack(pack_path: Path, dest_data: Path,
             with target.open("wb") as out:
                 shutil.copyfileobj(src, out, length=1 << 20)
             n += 1
-            if progress is not None and (n % 500 == 0):
+            # Fire often enough that a UI consumer can paint smooth
+            # progress and that signals queued onto the main thread
+            # (when the caller runs us on a QThread) don't bunch up.
+            # Every 50 files keeps the cost negligible while making the
+            # status bar feel live throughout a 10 GB extract.
+            if progress is not None and (n % 50 == 0):
                 progress(n, 0, f"Extracting… ({n:,} files)")
     finally:
         try:
