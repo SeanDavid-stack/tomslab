@@ -126,6 +126,14 @@ uninstaller — delete it manually if you want a complete wipe.
 A data pack is a pre-built snapshot of the Discord corpus, reference
 PDFs, and YouTube transcripts. Without one the application is empty.
 
+The currently shipped pack
+(`tomslab-data-2026-04-21.tar.zst`) is **10.5 GB compressed** and
+unpacks to roughly **25-30 GB on disk**, so plan for both download
+time and a chunky extraction. See the timing table below before you
+start.
+
+#### Steps
+
 1. Download the current data pack (`.tar.zst`) from the Google Drive
    link listed in the GitHub release notes.
 2. When prompted by Google Drive that it cannot scan the file for
@@ -137,11 +145,51 @@ PDFs, and YouTube transcripts. Without one the application is empty.
 5. Select the downloaded `.tar.zst` file.
 6. Confirm the replacement. The current data directory is backed up
    automatically to `data.backup-<timestamp>` before extraction.
-7. Wait for extraction to complete. Duration depends on disk speed —
-   expect several minutes on a spinning HDD, well under a minute on
-   an SSD.
+7. Wait for the install to complete. The status bar shows progress;
+   see the timing expectations below.
 
 Once installed, all tabs populate automatically.
+
+#### What to expect during install
+
+The install runs in three phases:
+
+| Phase | What it does | Approx duration |
+|---|---|---|
+| 1. SHA-256 verify | Reads the whole 10.5 GB once to check integrity. | ~1-2 min |
+| 2. Backup | Renames the current data directory to `data.backup-<timestamp>`. | Seconds |
+| 3. Extract + finalise | Decompresses zstd, writes ~25-30 GB to disk, rewrites paths in the database. | Dominates total time. |
+
+**End-to-end install time depends mostly on your disk speed:**
+
+| Disk | Total expected install time |
+|---|---|
+| NVMe SSD | ~5-8 min |
+| SATA SSD | ~8-15 min |
+| Mechanical HDD | 25-45 min, sometimes longer |
+
+#### "Not Responding" — please don't kill the app
+
+During the extract phase, the Tom's Lab window may show **"Not
+Responding"** in its title bar for a minute or two at a time. This
+is **not a crash** — the install is working. The progress callback
+fires only every 500 files, and Windows marks any window that hasn't
+painted in 5 seconds as "not responding" by default. **Wait it out;
+do not click the close X, do not End Task in the Task Manager, do
+not run the installer again.**
+
+If you genuinely think the install is stuck (no disk activity for
+several minutes — check the Task Manager **Performance → Disk** tab
+for activity on your install drive), the safe recovery path is:
+
+1. Close Tom's Lab.
+2. Restart Tom's Lab.
+3. Re-run **File → Install data pack…**. The auto-backup created in
+   step 2 means the previous data is still on disk under
+   `data.backup-<timestamp>`; nothing is lost.
+
+A future release will move the extract to a background thread so the
+window stays responsive throughout.
 
 ### 3.3 Install Ollama (required)
 

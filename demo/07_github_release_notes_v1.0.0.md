@@ -45,6 +45,8 @@ Counts verified against the production database:
 6. **(Recommended)** Add a free Gemini API key in **File → Settings…** for higher-quality Ask Tom answers.
 7. In Tom's Lab, **File → Install data pack…** and pick the `.tar.zst` you downloaded in step 2.
 
+⏱ **The data-pack install takes ~5-15 minutes** depending on your disk (NVMe SSD ~5-8 min; SATA SSD ~8-15 min; HDD up to 45 min). It unpacks ~25-30 GB to disk and the Tom's Lab window may show **"Not Responding"** for stretches during extraction — that is **not a crash**, just the UI thread blocked by the decompress. Please wait it out. A future release will move the extract to a background thread.
+
 Full install reference: see [`USER_MANUAL.md`](https://github.com/SeanDavid-stack/tomslab/blob/main/USER_MANUAL.md) §3.
 
 ---
