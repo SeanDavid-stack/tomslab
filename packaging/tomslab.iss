@@ -60,3 +60,33 @@ Name: "{userdesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopico
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent
+
+[Code]
+// On uninstall, ask the user whether to also delete their data dir
+// (%LOCALAPPDATA%\TomsLab\). Default = YES (delete) since most users
+// expect "uninstall" to mean "remove everything"; an explicit NO
+// preserves the data pack + bookmarks + favorites for a future reinstall.
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  AppDataPath: String;
+begin
+  if CurUninstallStep = usPostUninstall then
+  begin
+    AppDataPath := ExpandConstant('{localappdata}\TomsLab');
+    if DirExists(AppDataPath) then
+    begin
+      if MsgBox(
+        'Tom''s Lab user data is still on disk:' + #13#10 +
+        AppDataPath + #13#10 +
+        '(typically ~12 GB after a data pack install)' + #13#10 + #13#10 +
+        'Delete it now?' + #13#10 + #13#10 +
+        'YES = remove the data pack, bookmarks, favorites, logs, and settings (frees up disk space).' + #13#10 +
+        'NO = keep your data — choose this if you''re going to reinstall Tom''s Lab and want to skip re-downloading the data pack.',
+        mbConfirmation, MB_YESNO
+      ) = IDYES then
+      begin
+        DelTree(AppDataPath, True, True, True);
+      end;
+    end;
+  end;
+end;
