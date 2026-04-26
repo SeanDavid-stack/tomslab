@@ -8,8 +8,11 @@ Phase 1 gave us import + a plain list.  Phase 2 adds:
 from __future__ import annotations
 
 import html as _html
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 
 def _escape_html(s: str) -> str:
@@ -1531,35 +1534,70 @@ class MainWindow(QMainWindow):
     def _on_install_finished(self, result) -> None:  # InstallResult
         """Worker succeeded. Re-open against the freshly-installed DB,
         invalidate every in-memory cache, refresh every tab, surface a
-        summary."""
+        summary.
+
+        Every step here is wrapped in try/except + log so a single
+        post-install reload bug can't take the whole app down — the
+        install already succeeded; the data is on disk. Failure here
+        is cosmetic and the user can always close + relaunch.
+        """
+        log.info("post-install reload starting (extracted=%d)",
+                 result.extracted_files)
         manifest = self._pending_pack_manifest
         self._pending_pack_manifest = None
 
-        self._conn = dbmod.connect()
-        dbmod.initialise(self._conn)
-        self._propagate_new_conn()
+        # ---- 1. Re-open the connection -----------------------------------
+        try:
+            self._conn = dbmod.connect()
+            dbmod.initialise(self._conn)
+            log.info("post-install: DB re-opened + initialised")
+        except Exception:
+            log.exception("post-install: DB re-open failed")
 
-        # Drop every in-memory cache so Ask Tom / Gallery / Docs reload
-        # from the new embeddings.
+        # ---- 2. Re-point every view at the new connection ---------------
+        try:
+            self._propagate_new_conn()
+            log.info("post-install: new conn propagated to all views")
+        except Exception:
+            log.exception("post-install: _propagate_new_conn failed")
+
+        # ---- 3. Invalidate the semantic + visual caches -----------------
         try:
             semantic.invalidate_all_caches()
             visual.invalidate_all_caches()
+            log.info("post-install: semantic + visual caches invalidated")
         except Exception:
-            pass
+            log.exception("post-install: cache invalidation failed")
 
-        # Refresh the pixmap cache so old thumbnails aren't served from it.
-        QPixmapCache.clear()
+        # ---- 4. Pixmap cache --------------------------------------------
+        try:
+            QPixmapCache.clear()
+        except Exception:
+            log.exception("post-install: QPixmapCache.clear failed")
 
-        # Rebuild the bookmark + favorites sets the delegate tracks
-        # (these come from the DB and the pack ships empty bookmarks).
-        from tomslab import favorites as favmod
-        self._delegate.set_bookmarks(bmmod.all_message_ids(self._conn))
-        self._delegate.set_favorite_names(favmod.favorite_name_set(self._conn))
+        # ---- 5. Bookmarks + favorites sets the delegate tracks ----------
+        try:
+            from tomslab import favorites as favmod
+            self._delegate.set_bookmarks(bmmod.all_message_ids(self._conn))
+            self._delegate.set_favorite_names(favmod.favorite_name_set(self._conn))
+            log.info("post-install: delegate sets refreshed")
+        except Exception:
+            log.exception("post-install: delegate refresh failed")
 
-        self._reload_all_tabs()
+        # ---- 6. Reload every tab ----------------------------------------
+        try:
+            self._reload_all_tabs()
+            log.info("post-install: all tabs reloaded")
+        except Exception:
+            log.exception("post-install: _reload_all_tabs failed")
 
-        self._progress_bar.setVisible(False)
-        self._refresh_status()
+        # ---- 7. UI bits + summary ---------------------------------------
+        try:
+            self._progress_bar.setVisible(False)
+            self._refresh_status()
+        except Exception:
+            log.exception("post-install: progress/status update failed")
+
         summary = f"Data pack installed."
         if manifest:
             summary += f" v{manifest.app_version_min}, {manifest.release_date}."
@@ -1572,13 +1610,22 @@ class MainWindow(QMainWindow):
                     f" Preserved {kept:,} bookmark(s) and {favs:,} favorite(s) "
                     f"from your previous data."
                 )
-        self._status_label.setText(summary)
+        try:
+            self._status_label.setText(summary)
+        except Exception:
+            log.exception("post-install: status_label update failed")
+
         try:
             from tomslab.ui.notifications import notify
             notify("Tom's Lab — data pack installed", summary)
         except Exception:
             pass
-        QMessageBox.information(self, "Data pack installed", summary)
+
+        try:
+            QMessageBox.information(self, "Data pack installed", summary)
+        except Exception:
+            log.exception("post-install: success dialog failed")
+        log.info("post-install reload complete")
 
     def _propagate_new_conn(self) -> None:
         """After re-opening ``self._conn``, point every view that cached
