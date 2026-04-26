@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
+    QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -23,7 +25,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from tomslab import db as dbmod, secret_store
+from tomslab import db as dbmod, secret_store, updates as updatesmod
 from tomslab.ai import registry
 from tomslab.ai.base import ProviderError, ProviderUnavailable
 
@@ -39,6 +41,8 @@ class SettingsDialog(QDialog):
 
         tabs = QTabWidget()
         tabs.addTab(self._build_ai_tab(), "AI Providers")
+        tabs.addTab(self._build_transcription_tab(), "Transcription")
+        tabs.addTab(self._build_updates_tab(), "Updates")
         tabs.addTab(self._build_about_tab(), "About")
         layout.addWidget(tabs)
 
@@ -134,6 +138,112 @@ class SettingsDialog(QDialog):
         outer.addStretch(1)
         return w
 
+    def _build_transcription_tab(self) -> QWidget:
+        """Whisper model picker — speed vs accuracy trade-off.
+
+        Model change takes effect on the next 'Import from folder' or
+        'Import YouTube' run; the in-flight transcription keeps using
+        whatever was loaded when it started.
+        """
+        w = QWidget()
+        outer = QVBoxLayout(w)
+
+        box = QGroupBox("Whisper model (speed vs accuracy)")
+        form = QFormLayout(box)
+
+        current = dbmod.get_setting(
+            self._conn, "whisper_model", "distil-large-v3"
+        ) or "distil-large-v3"
+
+        self._whisper_combo = QComboBox()
+        # (display name, setting value, description)
+        choices = [
+            ("distil-large-v3  ~2× faster, near-identical quality (recommended)",
+             "distil-large-v3"),
+            ("large-v3  slowest, highest accuracy on jargon",
+             "large-v3"),
+            ("medium.en  ~3× faster than large-v3, slight jargon loss",
+             "medium.en"),
+            ("small.en  ~5× faster, noticeable accuracy dip",
+             "small.en"),
+            ("base.en  ~15× faster, rough — drafts only",
+             "base.en"),
+        ]
+        for label, value in choices:
+            self._whisper_combo.addItem(label, userData=value)
+        idx = self._whisper_combo.findData(current)
+        if idx >= 0:
+            self._whisper_combo.setCurrentIndex(idx)
+        form.addRow("Model:", self._whisper_combo)
+
+        hint = QLabel(
+            "Changes apply to the next transcription run. "
+            "The currently-running job keeps its model. Relaunching "
+            "Tom's Lab picks up the new setting immediately."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #949BA4; font-size: 11px; padding-top: 4px;")
+        form.addRow("", hint)
+
+        outer.addWidget(box)
+        outer.addStretch(1)
+        return w
+
+    def _build_updates_tab(self) -> QWidget:
+        """Updates tab — auto-check toggle, manifest URL, manual check.
+
+        The manifest URL is user-editable so the PM can repoint at a
+        different repo later without a code change.
+        """
+        w = QWidget()
+        outer = QVBoxLayout(w)
+
+        box = QGroupBox("Update checks")
+        form = QFormLayout(box)
+
+        self._updates_auto = QCheckBox("Check for updates automatically (weekly)")
+        self._updates_auto.setChecked(updatesmod.get_auto_check_enabled(self._conn))
+        form.addRow("", self._updates_auto)
+
+        self._updates_url = QLineEdit(updatesmod.get_manifest_url(self._conn))
+        self._updates_url.setPlaceholderText(updatesmod.DEFAULT_MANIFEST_URL)
+        form.addRow("Manifest URL:", self._updates_url)
+
+        row = QHBoxLayout()
+        self._updates_check_now = QPushButton("Check now")
+        self._updates_check_now.clicked.connect(self._on_check_updates_now)
+        row.addWidget(self._updates_check_now)
+        row.addStretch(1)
+        form.addRow("", self._wrap(row))
+
+        hint = QLabel(
+            "Free utility — no auto-install, no support line. "
+            "If an update is available you'll see a toast and the Help "
+            "menu will badge it; the download is a manual install."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #949BA4; font-size: 11px;")
+        form.addRow("", hint)
+
+        outer.addWidget(box)
+        outer.addStretch(1)
+        return w
+
+    def _on_check_updates_now(self) -> None:
+        # Persist any in-flight edits to the URL first so "Check now"
+        # uses what the user just typed, not the last-saved value.
+        updatesmod.set_manifest_url(self._conn, self._updates_url.text().strip())
+        updatesmod.set_auto_check_enabled(self._conn, self._updates_auto.isChecked())
+        from tomslab.ui.update_dialog import UpdateDialog
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            info = updatesmod.check_for_update(self._conn)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if info is not None and info.is_newer:
+            updatesmod.mark_version_notified(self._conn, info.latest_version)
+        UpdateDialog(self._conn, info, parent=self).exec()
+
     def _build_about_tab(self) -> QWidget:
         from tomslab import __app_name__, __version__
         from tomslab.paths import database_path
@@ -183,6 +293,13 @@ class SettingsDialog(QDialog):
         dbmod.set_setting(self._conn, "chat_model_gemini", self._gem_chat_model.text().strip())
         # api key
         secret_store.store_api_key(self._conn, "gemini", self._gem_key.text().strip())
+        # whisper model
+        dbmod.set_setting(
+            self._conn, "whisper_model", self._whisper_combo.currentData()
+        )
+        # updates
+        updatesmod.set_manifest_url(self._conn, self._updates_url.text().strip())
+        updatesmod.set_auto_check_enabled(self._conn, self._updates_auto.isChecked())
         registry.reset_cache()
         self.accept()
 

@@ -7,10 +7,11 @@ from __future__ import annotations
 
 import html
 import sqlite3
-import webbrowser
 from typing import Callable
 
-from PyQt6.QtCore import Qt, pyqtSignal, QUrl
+from tomslab.ui.browser_open import open_browser
+
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl
 from PyQt6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -20,7 +21,36 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
+from tomslab import db as dbmod
 from tomslab.evolution import EvolutionTimeline, build_timeline
+
+
+class _TimelineWorker(QThread):
+    """Run build_timeline() off the UI thread. The retrieval does
+    semantic search across every indexed post + video chunk for a
+    concept, which on a big corpus can take 3-10 seconds and blocks the
+    window enough that Windows flags it 'Not Responding'."""
+
+    finished_ok = pyqtSignal(object)   # EvolutionTimeline
+    failed = pyqtSignal(str)
+
+    def __init__(self, concept: str, parent=None) -> None:
+        super().__init__(parent)
+        self._concept = concept
+
+    def run(self) -> None:
+        try:
+            # QThreads cannot share a sqlite3 connection safely with the
+            # UI thread, so each worker opens its own.
+            conn = dbmod.connect()
+            dbmod.initialise(conn)
+            try:
+                tl = build_timeline(conn, self._concept)
+            finally:
+                conn.close()
+            self.finished_ok.emit(tl)
+        except Exception as exc:
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
 
 
 _COLOR_BG = "#1E1F22"
@@ -97,15 +127,27 @@ class EvolutionDialog(QDialog):
         outer.addLayout(btn_row)
 
     def _load_timeline(self) -> None:
-        try:
-            tl = build_timeline(self._conn, self._concept)
-        except Exception as exc:
-            self._body.setHtml(
-                f"<p style='color:{_COLOR_RED};'>Failed to build timeline: "
-                f"{html.escape(str(exc))}</p>"
-            )
-            return
-        self._render(tl)
+        """Kick off the timeline build on a background QThread. Without
+        this, the build runs on the UI thread and the dialog flashes
+        'Not Responding' for several seconds on large corpora."""
+        self._subhead.setText(f"Loading timeline for {self._concept}…")
+        self._body.setHtml(
+            f"<div style='color:{_COLOR_DIM}; padding: 24px 4px;'>"
+            f"Scanning Discord posts and video transcripts for "
+            f"<b>{html.escape(self._concept)}</b>. This usually takes "
+            f"a few seconds on a large corpus.</div>"
+        )
+        self._worker = _TimelineWorker(self._concept, parent=self)
+        self._worker.finished_ok.connect(self._render)
+        self._worker.failed.connect(self._on_worker_failed)
+        self._worker.start()
+
+    def _on_worker_failed(self, err: str) -> None:
+        self._subhead.setText("")
+        self._body.setHtml(
+            f"<p style='color:{_COLOR_RED};'>Failed to build timeline: "
+            f"{html.escape(err)}</p>"
+        )
 
     def _render(self, tl: EvolutionTimeline) -> None:
         if not tl.buckets:
@@ -190,4 +232,4 @@ class EvolutionDialog(QDialog):
         if row is None:
             return
         from tomslab.chat import _youtube_link
-        webbrowser.open(_youtube_link(row["url"] or "", float(row["ss"] or 0.0)))
+        open_browser(_youtube_link(row["url"] or "", float(row["ss"] or 0.0)))

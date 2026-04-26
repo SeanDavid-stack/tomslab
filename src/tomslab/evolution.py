@@ -59,6 +59,7 @@ def build_timeline(
     conn: sqlite3.Connection,
     concept: str,
     per_bucket: int = 3,
+    tom_only: bool = True,
 ) -> EvolutionTimeline:
     """Walk the corpus for mentions of ``concept``, group by quarter,
     and return at most ``per_bucket`` items per quarter sorted by
@@ -67,6 +68,11 @@ def build_timeline(
     ``concept`` is matched as a literal word boundary — NVPOC only
     matches "NVPOC", not "nvpoca" or "vpoc". Whole-word matching keeps
     acronyms sharp and avoids noise from substring collisions.
+
+    ``tom_only`` (default True): restricts Discord messages to Tom's
+    featured-speaker posts, so the timeline reflects how Tom's own
+    framing has evolved rather than mixing in community chatter.
+    Video chunks are already Tom-only by nature of the TomTube source.
     """
     concept = (concept or "").strip()
     if not concept:
@@ -75,18 +81,36 @@ def build_timeline(
     # FTS5 phrase match — case-insensitive, whole-word, ranked by bm25.
     # messages_fts exposes `id UNINDEXED` as the join column.
     fts_q = f'"{concept}"'
-    msg_rows = conn.execute(
-        """
-        SELECT m.id, m.author_nickname, m.author_name, m.timestamp,
-               m.content, bm25(messages_fts) AS rank
-          FROM messages_fts
-          JOIN messages m ON m.id = messages_fts.id
-         WHERE messages_fts MATCH ?
-         ORDER BY rank
-         LIMIT 400
-        """,
-        (fts_q,),
-    ).fetchall()
+    if tom_only:
+        # Prefer is_featured_speaker=1 (Tom) so we don't hard-code an
+        # author_name that could change. Fall through cleanly if every
+        # row has is_featured_speaker NULL (older DBs).
+        msg_rows = conn.execute(
+            """
+            SELECT m.id, m.author_nickname, m.author_name, m.timestamp,
+                   m.content, bm25(messages_fts) AS rank
+              FROM messages_fts
+              JOIN messages m ON m.id = messages_fts.id
+             WHERE messages_fts MATCH ?
+               AND m.is_featured_speaker = 1
+             ORDER BY rank
+             LIMIT 400
+            """,
+            (fts_q,),
+        ).fetchall()
+    else:
+        msg_rows = conn.execute(
+            """
+            SELECT m.id, m.author_nickname, m.author_name, m.timestamp,
+                   m.content, bm25(messages_fts) AS rank
+              FROM messages_fts
+              JOIN messages m ON m.id = messages_fts.id
+             WHERE messages_fts MATCH ?
+             ORDER BY rank
+             LIMIT 400
+            """,
+            (fts_q,),
+        ).fetchall()
 
     vid_rows = conn.execute(
         """

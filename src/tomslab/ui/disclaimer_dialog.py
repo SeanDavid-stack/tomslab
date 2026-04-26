@@ -39,11 +39,18 @@ class DisclaimerGateDialog(QDialog):
     - If the text is short enough to fit without scrolling, the accept
       button is enabled immediately (no fake gate)
     - 'Decline and exit' is always enabled
+    - ``review_only=True`` mode drops the accept/decline buttons and
+      shows a single 'Close' button — used by Help → Disclaimer / Legal
+      where the user is reviewing, not agreeing.
     """
 
-    def __init__(self, html: str, parent=None) -> None:
+    def __init__(self, html: str, parent=None, *, review_only: bool = False) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Tom's Lab — Required: review & accept terms")
+        self._review_only = review_only
+        self.setWindowTitle(
+            "Tom's Lab — Disclaimer & Legal" if review_only
+            else "Tom's Lab — Required: review & accept terms"
+        )
         self.setModal(True)
         # Come up above other apps the first time the app launches.
         self.setWindowFlags(
@@ -62,11 +69,14 @@ class DisclaimerGateDialog(QDialog):
         outer.setSpacing(8)
 
         heading = QLabel(
-            "<h3>Before you use Tom's Lab</h3>"
-            "<p style='color:#b00020;'><b>Required reading.</b> "
-            "Scroll to the bottom to review the full terms, then click "
-            "<b>I have read and accept these terms</b> to continue. "
-            "If you decline, the app will close.</p>"
+            ("<h3>Tom's Lab — Disclaimer &amp; Legal</h3>"
+             "<p>Scroll through to review the full terms.</p>")
+            if self._review_only else
+            ("<h3>Before you use Tom's Lab</h3>"
+             "<p style='color:#b00020;'><b>Required reading.</b> "
+             "Scroll to the bottom to review the full terms, then click "
+             "<b>I have read and accept these terms</b> to continue. "
+             "If you decline, the app will close.</p>")
         )
         heading.setWordWrap(True)
         heading.setTextFormat(Qt.TextFormat.RichText)
@@ -88,19 +98,29 @@ class DisclaimerGateDialog(QDialog):
         self._scroll_hint.setStyleSheet(
             "color: #FFC857; font-size: 11px; padding: 2px 4px;"
         )
+        # In review-only mode the scroll hint + accept/decline buttons
+        # are hidden — just a single Close button.
+        self._scroll_hint.setVisible(not self._review_only)
         outer.addWidget(self._scroll_hint)
 
         btn_row = QHBoxLayout()
-        self._decline_btn = QPushButton(_DECLINE_TEXT)
-        self._decline_btn.clicked.connect(self.reject)
-        self._decline_btn.setStyleSheet(self._btn_style())
-        btn_row.addWidget(self._decline_btn)
-        btn_row.addStretch(1)
-        self._accept_btn = QPushButton(_ACCEPT_TEXT)
-        self._accept_btn.setEnabled(False)
-        self._accept_btn.setStyleSheet(self._btn_style(primary=True))
-        self._accept_btn.clicked.connect(self._on_accept)
-        btn_row.addWidget(self._accept_btn)
+        if self._review_only:
+            btn_row.addStretch(1)
+            close_btn = QPushButton("Close")
+            close_btn.clicked.connect(self.accept)
+            close_btn.setStyleSheet(self._btn_style(primary=True))
+            btn_row.addWidget(close_btn)
+        else:
+            self._decline_btn = QPushButton(_DECLINE_TEXT)
+            self._decline_btn.clicked.connect(self.reject)
+            self._decline_btn.setStyleSheet(self._btn_style())
+            btn_row.addWidget(self._decline_btn)
+            btn_row.addStretch(1)
+            self._accept_btn = QPushButton(_ACCEPT_TEXT)
+            self._accept_btn.setEnabled(False)
+            self._accept_btn.setStyleSheet(self._btn_style(primary=True))
+            self._accept_btn.clicked.connect(self._on_accept)
+            btn_row.addWidget(self._accept_btn)
         outer.addLayout(btn_row)
 
         # Wire the scroll-to-bottom detector. Also check on show in case
@@ -143,7 +163,10 @@ class DisclaimerGateDialog(QDialog):
     def _check_scroll_position(self, *_ignored) -> None:
         """If the user has reached (or is within a few pixels of) the
         end of the scroll range — or the text fits without scrolling
-        at all — enable the accept button."""
+        at all — enable the accept button. No-op in review-only mode
+        (no accept button exists)."""
+        if self._review_only:
+            return
         bar = self._text.verticalScrollBar()
         at_bottom = (bar.maximum() == 0) or (bar.value() >= bar.maximum() - 4)
         self._accept_btn.setEnabled(at_bottom)

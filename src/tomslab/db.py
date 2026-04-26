@@ -82,6 +82,24 @@ CREATE TABLE IF NOT EXISTS message_concepts (
     PRIMARY KEY (message_id, concept_id)
 );
 
+-- ---- chat history (auto-saved per Q/A, separate from explicit bookmarks)
+-- Every Ask Tom turn lands here so the user can reopen past questions
+-- from the sidebar / Recent menu. Explicit "⭐ Save" still goes to the
+-- bookmarks table for long-term keeping; history is a rolling log that
+-- the user can clear any time.
+CREATE TABLE IF NOT EXISTS chat_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    question TEXT,
+    answer TEXT,
+    citations TEXT,           -- JSON list of "kind:raw" strings
+    primary_provider TEXT,
+    tom_only INTEGER DEFAULT 0,
+    k_discord_tom INTEGER,
+    k_discord_other INTEGER,
+    asked_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_chat_history_asked_at ON chat_history(asked_at);
+
 -- ---- image descriptions (populated Phase 6) --------------------------------
 CREATE TABLE IF NOT EXISTS image_descriptions (
     attachment_id TEXT PRIMARY KEY,
@@ -288,6 +306,18 @@ CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
     author_nickname,
     tokenize = "porter unicode61 remove_diacritics 2"
 );
+
+-- FTS5 over transcript chunks. The legacy ``LIKE '%q%'`` search in
+-- the TomTube UI full-scans ~30K chunks × ~500 chars each per
+-- keystroke; this reduces the same search to milliseconds. Contentless
+-- external so deletes / edits on ``video_chunks`` don't need manual
+-- sync (we rebuild on launch via _backfill_video_chunks_fts).
+CREATE VIRTUAL TABLE IF NOT EXISTS video_chunks_fts USING fts5(
+    chunk_id UNINDEXED,
+    video_id UNINDEXED,
+    text,
+    tokenize = "porter unicode61 remove_diacritics 2"
+);
 """
 
 # Phase-1 defaults — set once on fresh DBs, never overwritten.
@@ -327,32 +357,147 @@ DEFAULT_SETTINGS: dict[str, str] = {
     # logged-in session from one of: chrome, edge, firefox, brave,
     # opera, vivaldi. Empty string = don't send cookies.
     "youtube_browser_cookies": "chrome",
-    "whisper_model": "large-v3",
+    "whisper_model": "distil-large-v3",
+    # Ask Tom per-cohort retrieval budget. chat_tom_only=1 collapses the
+    # pool to Tom-only (community skipped). Separate K for Tom vs others
+    # lets the user weight Tom's voice heavier when the crowd is noisy
+    # or equalise them when the community has useful answers.
+    "chat_tom_only": "0",
+    "chat_k_discord_tom": "5",
+    "chat_k_discord_other": "4",
+    # Videos-only mode: when "1", retrieval skips Discord messages and
+    # PDFs entirely and returns only YouTube transcript chunks. Useful
+    # when the user wants Tom's spoken teaching in isolation (clean of
+    # community chatter, chart captions, and documentation).
+    "chat_videos_only": "0",
+    # Mirror of videos_only: when "1", retrieval skips video chunks and
+    # PDFs entirely and returns only Discord conversation windows.
+    # Useful when the user wants Tom's written voice (and community
+    # context) in isolation — e.g. browsing his live-trading narration
+    # or back-and-forth with other traders without video/PDF noise.
+    "chat_discord_only": "0",
+    "sources_sort_order": "newest",
     "schema_version": "1",
 }
 
 
 def connect(path: Path | None = None) -> sqlite3.Connection:
-    """Open (and create if needed) the tomslab SQLite database."""
+    """Open (and create if needed) the tomslab SQLite database.
+
+    ``busy_timeout = 30000``: when the chart classifier / image
+    embedder / video ingest is hammering the DB with writes and a
+    second connection (Ask Tom, Feed search, etc.) tries to write
+    concurrently, SQLite would otherwise raise 'database is locked'
+    instantly. With this timeout the second writer simply waits up
+    to 30 seconds for the lock — which is effectively invisible to
+    the user and avoids mid-chat errors during long background jobs.
+    """
     db_path = path or database_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode = WAL;")
     conn.execute("PRAGMA foreign_keys = ON;")
     conn.execute("PRAGMA synchronous = NORMAL;")
+    conn.execute("PRAGMA busy_timeout = 30000;")
     return conn
 
 
 def initialise(conn: sqlite3.Connection) -> None:
     """Create tables + seed default settings. Idempotent."""
     conn.executescript(SCHEMA)
+    _apply_column_migrations(conn)
     for k, v in DEFAULT_SETTINGS.items():
         conn.execute(
             "INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)", (k, v)
         )
     conn.commit()
     _backfill_fts(conn)
+    _backfill_video_chunks_fts(conn)
+    _backfill_video_chunk_counts(conn)
+
+
+def _apply_column_migrations(conn: sqlite3.Connection) -> None:
+    """Add columns to existing tables for features that post-date the
+    initial SCHEMA. SQLite raises 'duplicate column name' if the column
+    already exists — we swallow that so the call is idempotent."""
+    column_additions: list[tuple[str, str, str]] = [
+        # (table, column, type+default)
+        ("attachments", "chart_score",    "REAL DEFAULT NULL"),
+        ("attachments", "chart_decision", "TEXT DEFAULT NULL"),
+        ("attachments", "classified_at",  "TEXT DEFAULT NULL"),
+        # Cached transcript-chunk count per video. Written by the
+        # transcription worker; read by the TomTube left-list render
+        # path so we don't run a COUNT(*) subquery per row on every
+        # search keystroke.
+        ("videos",      "n_chunks",       "INTEGER DEFAULT 0"),
+    ]
+    for table, column, type_decl in column_additions:
+        try:
+            conn.execute(
+                f"ALTER TABLE {table} ADD COLUMN {column} {type_decl}"
+            )
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" in str(exc).lower():
+                continue
+            raise
+
+
+def _backfill_video_chunks_fts(conn: sqlite3.Connection) -> None:
+    """Populate ``video_chunks_fts`` from the ``video_chunks`` table
+    whenever its row count doesn't match. Keeps the FTS index self-
+    healing: after a data-pack install or bulk-ingest the index
+    rebuilds once at next launch rather than requiring users to hit a
+    'reindex' button.
+    """
+    try:
+        n_chunks = conn.execute(
+            "SELECT COUNT(*) FROM video_chunks"
+        ).fetchone()[0] or 0
+        n_fts = conn.execute(
+            "SELECT COUNT(*) FROM video_chunks_fts"
+        ).fetchone()[0] or 0
+    except sqlite3.OperationalError:
+        return
+    if n_fts >= n_chunks or n_chunks == 0:
+        return
+    conn.execute("DELETE FROM video_chunks_fts")
+    conn.execute(
+        """
+        INSERT INTO video_chunks_fts(chunk_id, video_id, text)
+        SELECT id, video_id, COALESCE(text, '')
+          FROM video_chunks
+        """
+    )
+    conn.commit()
+
+
+def _backfill_video_chunk_counts(conn: sqlite3.Connection) -> None:
+    """Populate ``videos.n_chunks`` for any video whose cached count is
+    stale or zero but whose ``video_chunks`` rows exist. Called once on
+    every app launch — cheap when up-to-date (one aggregate scan), and
+    self-healing when the counts drift (e.g. after a data-pack install
+    with chunks but no cached count).
+    """
+    try:
+        conn.execute(
+            """
+            UPDATE videos
+               SET n_chunks = COALESCE(
+                   (SELECT COUNT(*) FROM video_chunks
+                     WHERE video_chunks.video_id = videos.id),
+                   0)
+             WHERE n_chunks IS NULL
+                OR n_chunks = 0
+                OR n_chunks <> (
+                   SELECT COUNT(*) FROM video_chunks
+                    WHERE video_chunks.video_id = videos.id)
+            """
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        # Column or tables missing on very-old DBs — non-fatal.
+        pass
 
 
 def _backfill_fts(conn: sqlite3.Connection) -> None:

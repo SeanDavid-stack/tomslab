@@ -6,6 +6,7 @@ from pathlib import Path
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from tomslab import db as dbmod
+from tomslab.jobs import registry as jobs_registry
 
 
 class VideoIngestWorker(QThread):
@@ -26,24 +27,36 @@ class VideoIngestWorker(QThread):
         self._limit = limit
         self._model_name = model_name
         self._bitrate_kbps = bitrate_kbps
+        self._job_id = "tomtube.ingest_channel"
 
     def run(self) -> None:
+        jobs_registry.start(self._job_id, "TomTube ingest (YouTube)")
         try:
             from tomslab.ingest.youtube import ingest_channel
             conn = dbmod.connect()
             dbmod.initialise(conn)
             try:
+                def _progress(s: str, c: int, t: int) -> None:
+                    self.progress.emit(s, c, t)
+                    jobs_registry.update(
+                        self._job_id, done=c, total=t, message=s,
+                    )
                 report = ingest_channel(
                     conn,
                     limit=self._limit,
                     model_name=self._model_name,
                     bitrate_kbps=self._bitrate_kbps,
-                    progress=lambda s, c, t: self.progress.emit(s, c, t),
+                    progress=_progress,
                 )
             finally:
                 conn.close()
+            jobs_registry.finish(self._job_id, ok=True, message="done")
             self.finished_ok.emit(report)
         except Exception as exc:
+            jobs_registry.finish(
+                self._job_id, ok=False,
+                message=f"{type(exc).__name__}: {exc}",
+            )
             self.failed.emit(f"{type(exc).__name__}: {exc}")
 
 
@@ -68,21 +81,33 @@ class FolderIngestWorker(QThread):
         super().__init__(parent)
         self._folder = Path(folder)
         self._model_name = model_name
+        self._job_id = "tomtube.ingest_folder"
 
     def run(self) -> None:
+        jobs_registry.start(self._job_id, "TomTube transcribe (folder)")
         try:
             from tomslab.ingest.youtube import ingest_folder
             conn = dbmod.connect()
             dbmod.initialise(conn)
             try:
+                def _progress(s: str, c: int, t: int) -> None:
+                    self.progress.emit(s, c, t)
+                    jobs_registry.update(
+                        self._job_id, done=c, total=t, message=s,
+                    )
                 report = ingest_folder(
                     conn,
                     self._folder,
                     model_name=self._model_name,
-                    progress=lambda s, c, t: self.progress.emit(s, c, t),
+                    progress=_progress,
                 )
             finally:
                 conn.close()
+            jobs_registry.finish(self._job_id, ok=True, message="done")
             self.finished_ok.emit(report)
         except Exception as exc:
+            jobs_registry.finish(
+                self._job_id, ok=False,
+                message=f"{type(exc).__name__}: {exc}",
+            )
             self.failed.emit(f"{type(exc).__name__}: {exc}")

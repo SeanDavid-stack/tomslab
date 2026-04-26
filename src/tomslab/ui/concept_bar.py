@@ -102,8 +102,21 @@ class ConceptChipBar(QWidget):
         for r in rows:
             name = r["name"] or ""
             desc = r["description"] or ""
+            # Skip "prefix" glossary entries entirely — these are
+            # helper notations like "(D) Prefix for current session
+            # reference values" or "(P or Y) Prefix for previous-day
+            # references". They aren't searchable terms on their own;
+            # they qualify other terms (DVPOC, PVPOC, etc.). Showing
+            # them as chips produces nonsense match counts.
+            if " Prefix" in desc or desc.lower().lstrip("( ").startswith("prefix"):
+                continue
             abbr = _abbr_from_description(desc)
             label = abbr or name
+            # If the best label we can produce is still under 2 chars
+            # (single-letter abbr + short name), skip the chip — it
+            # would match too broadly in FTS to be useful.
+            if len(label) < 2:
+                continue
             search_term = abbr or name
             n = _count_mentions(self._conn, search_term)
             entries.append((name, desc, label, n))
@@ -177,17 +190,42 @@ class ConceptChipBar(QWidget):
 
 
 def _abbr_from_description(desc: str) -> str:
-    """Glossary entries are stored as '(ABBR) definition' — pull the ABBR out.
+    """Glossary entries are stored as '(ABBR) definition' — pull a
+    searchable abbr out.
 
-    Falls back to empty string when the description doesn't start with a
-    parenthesised abbreviation.
+    Handles three cases:
+      * ``(ABBR)`` — return ABBR.
+      * ``(X or Y or Z)`` — return the longest alternative that is
+        at least 2 chars. Avoids the previous bug where ``"COMP or C"``
+        was passed verbatim to FTS as a malformed query.
+      * single-letter abbreviations — return empty string so the caller
+        can skip this concept. A 1-char token like ``D`` matches every
+        "d" in the corpus (``"I'd"``, ``"did"``, ``"Day"``) and swamps
+        the chip bar with 176K meaningless hits.
+
+    Returns empty string when no usable abbr can be extracted.
     """
     if not desc or not desc.startswith("("):
         return ""
     end = desc.find(")")
     if end < 0:
         return ""
-    return desc[1:end].strip()
+    raw = desc[1:end].strip()
+    if not raw:
+        return ""
+    # Compound form: split on " or " / "/" and keep distinguishable
+    # alternatives only. The bare separator form ("P or Y") with all
+    # options under 2 chars returns empty → caller skips this concept.
+    import re as _re
+    if _re.search(r"\s+or\s+|/", raw, flags=_re.IGNORECASE):
+        parts = [p.strip() for p in _re.split(r"\s+or\s+|/", raw, flags=_re.IGNORECASE)]
+        usable = [p for p in parts if len(p) >= 2]
+        if not usable:
+            return ""
+        # Prefer the longest alternative (usually the most specific).
+        return max(usable, key=len)
+    # Plain abbr: reject 1-char noise.
+    return raw if len(raw) >= 2 else ""
 
 
 def _count_mentions(conn: sqlite3.Connection, term: str) -> int:

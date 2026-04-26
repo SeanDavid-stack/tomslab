@@ -142,6 +142,10 @@ class MessageListModel(QAbstractListModel):
         self._search_ids: list[str] = []   # pre-resolved typed IDs in search mode
         self._mixed_hits: list = []        # MixedSemanticHit for semantic mode
         self._last_error: str = ""
+        # When True the model is showing a windowed timeline around a
+        # specific message (see ``show_window_around``). ``set_query`` and
+        # ``reload`` clear it so the next user search/browse resets the view.
+        self._is_window: bool = False
         self._hide_noise: bool = (
             dbmod.get_setting(conn, "hide_feed_noise", "1") == "1"
         )
@@ -164,7 +168,7 @@ class MessageListModel(QAbstractListModel):
         query = (query or "").strip()
         if mode is None:
             mode = self._mode
-        if query == self._query and mode == self._mode:
+        if query == self._query and mode == self._mode and not self._is_window:
             return
         self._query = query
         self._mode = mode
@@ -193,6 +197,7 @@ class MessageListModel(QAbstractListModel):
         self._search_ids = []
         self._total_full = 0
         self._last_error = ""
+        self._is_window = False
 
         # Note: the noise filter below only applies to BROWSE mode. For
         # SEARCH modes, the search layer already filters out trivially-short
@@ -256,6 +261,67 @@ class MessageListModel(QAbstractListModel):
         """Capped total the model will actually expose through fetchMore."""
         return self._total
 
+    def show_window_around(self, message_id: str, context: int = 100) -> int | None:
+        """Replace the timeline with a window centered on ``message_id`` and
+        return the row index of the target, or ``None`` if not found.
+
+        Used when "Show in timeline" targets a message older than the
+        ``MAX_BROWSE_ROWS`` cap or one hidden by the noise filter — the
+        model enters a synthetic typed-id mode so the cap doesn't apply
+        and the target itself is always present.
+        """
+        row = self._conn.execute(
+            "SELECT timestamp FROM messages WHERE id = ?", (message_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        ts = row["timestamp"] or ""
+
+        newer = self._conn.execute(
+            """
+            SELECT id FROM messages
+             WHERE (timestamp > ? OR (timestamp = ? AND id > ?))
+             ORDER BY timestamp ASC, id ASC
+             LIMIT ?
+            """,
+            (ts, ts, message_id, context),
+        ).fetchall()
+        older = self._conn.execute(
+            """
+            SELECT id FROM messages
+             WHERE (timestamp < ? OR (timestamp = ? AND id < ?))
+             ORDER BY timestamp DESC, id DESC
+             LIMIT ?
+            """,
+            (ts, ts, message_id, context),
+        ).fetchall()
+
+        newer_ids = [r["id"] for r in newer]
+        newer_ids.reverse()
+        older_ids = [r["id"] for r in older]
+
+        typed_ids = (
+            [f"msg:{i}" for i in newer_ids]
+            + [f"msg:{message_id}"]
+            + [f"msg:{i}" for i in older_ids]
+        )
+
+        self.beginResetModel()
+        self._rows = []
+        self._loaded = 0
+        self._search_ids = typed_ids
+        self._mixed_hits = []
+        self._total_full = len(typed_ids)
+        self._total = len(typed_ids)
+        self._query = ""
+        self._mode = SearchMode.KEYWORD
+        self._last_error = ""
+        self._is_window = True
+        self.endResetModel()
+        self._load_page()
+
+        return len(newer_ids)
+
     # ------------------------------------------------------------------
     # Qt model API
     # ------------------------------------------------------------------
@@ -285,8 +351,6 @@ class MessageListModel(QAbstractListModel):
             speaker = row.author_nickname or row.author_name or "?"
             snippet = (row.content or "").strip().replace("\n", " ")[:160]
             return f"{speaker}: {snippet}"
-        if role == Qt.ItemDataRole.ToolTipRole:
-            return row.content or ""
         return None
 
     # ------------------------------------------------------------------
@@ -296,7 +360,7 @@ class MessageListModel(QAbstractListModel):
         if self._loaded >= self._total:
             return
         take = min(PAGE_SIZE, self._total - self._loaded)
-        if self._query:
+        if self._search_ids:
             batch_ids = self._search_ids[self._loaded : self._loaded + take]
             message_rows = self._fetch_mixed_by_typed_ids(batch_ids)
         else:

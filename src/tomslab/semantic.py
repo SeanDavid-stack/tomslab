@@ -64,10 +64,50 @@ class _Cache:
         self.signature: tuple | None = None
         self.window_ids: np.ndarray | None = None     # int64 array of window ids
         self.anchor_ids: list[str] | None = None      # message id per row, parallel to window_ids
+        # parallel to window_ids — True for windows anchored on Tom's
+        # featured-speaker post. Used by mixed_semantic_search to apply
+        # a Tom-voice boost so his Discord posts aren't crowded out by
+        # video chunks in the top-K.
+        self.is_tom: np.ndarray | None = None
         self.matrix: np.ndarray | None = None          # (N, D) float32, L2-normalised
 
 
 _cache = _Cache()
+
+
+def invalidate_all_caches() -> None:
+    """Invalidate every semantic cache (messages + docs + videos).
+
+    Called whenever an embedding job finishes so Ask Tom's in-memory
+    matrices reload with the fresh data. Without this, the app can
+    get stuck serving an empty/stale cache if the first query ran
+    before embeddings finished building.
+    """
+    invalidate_cache()
+    invalidate_doc_cache()
+    invalidate_video_cache()
+
+
+def prewarm_all_caches(conn: sqlite3.Connection) -> None:
+    """Force every semantic matrix to load now, rather than lazily on
+    the first Ask Tom query. Intended to be called from a background
+    thread right after app startup. Matrix reads are disk-bound
+    (~270 MB across the three) so pulling them in-memory up front
+    means the user's first query doesn't pay the 3-5 second warm-up.
+
+    Silently swallows any per-cache error — prewarm is best-effort
+    and the lazy path will still work if anything here fails.
+    """
+    for loader, lock in (
+        (_load_matrix, _cache.lock),
+        (_load_doc_matrix, _doc_cache.lock),
+        (_load_video_matrix, _video_cache.lock),
+    ):
+        try:
+            with lock:
+                loader(conn)
+        except Exception:
+            pass
 
 
 def invalidate_cache() -> None:
@@ -99,9 +139,11 @@ def _load_matrix(conn: sqlite3.Connection) -> bool:
     rows = conn.execute(
         """
         SELECT we.window_id AS wid, we.dim AS dim, we.embedding AS blob,
-               w.anchor_message_id AS mid
+               w.anchor_message_id AS mid,
+               COALESCE(m.is_featured_speaker, 0) AS is_tom
           FROM window_embeddings we
           JOIN conversation_windows w ON w.id = we.window_id
+          LEFT JOIN messages m ON m.id = w.anchor_message_id
         """
     ).fetchall()
     if not rows:
@@ -114,6 +156,7 @@ def _load_matrix(conn: sqlite3.Connection) -> bool:
     mat = np.empty((n, dim), dtype=np.float32)
     ids = np.empty(n, dtype=np.int64)
     anchors: list[str] = [""] * n
+    is_tom = np.zeros(n, dtype=np.float32)
     for i, r in enumerate(rows):
         v = np.frombuffer(r["blob"], dtype=np.float32)
         if v.size != dim:
@@ -122,6 +165,7 @@ def _load_matrix(conn: sqlite3.Connection) -> bool:
         mat[i] = v
         ids[i] = int(r["wid"])
         anchors[i] = r["mid"] or ""
+        is_tom[i] = 1.0 if (r["is_tom"] or 0) else 0.0
 
     # L2-normalise rows — cosine becomes a single dot product
     norms = np.linalg.norm(mat, axis=1, keepdims=True)
@@ -132,6 +176,7 @@ def _load_matrix(conn: sqlite3.Connection) -> bool:
     _cache.matrix = mat
     _cache.window_ids = ids
     _cache.anchor_ids = anchors
+    _cache.is_tom = is_tom
     return True
 
 
@@ -311,6 +356,15 @@ def docs_available(conn: sqlite3.Connection) -> bool:
 _TOM_BOOST = 0.18        # tom_b-authored PDFs jump to the front for definitional queries
 _THIRD_PARTY_BOOST = 0.0  # third-party books ride at native cosine (no artificial lift)
 _UNKNOWN_DOC_BOOST = 0.02
+# Video chunks are longer, denser, and pure-Tom, so they earn a modest
+# lift over raw cosine — but nothing like the +0.18 we used to apply,
+# which was dominating the ranker and pushing Discord out of the top-K
+# even when Tom had said the same thing on the channel.
+_VIDEO_BOOST = 0.06
+# Tom's own Discord posts are the most direct expression of his
+# framing. Mirror the Tom-authored-PDF boost so his Discord voice
+# competes with his video voice instead of losing to it.
+_TOM_MSG_BOOST = 0.10
 
 
 def _doc_author_boost(author: str) -> float:
@@ -394,6 +448,7 @@ def mixed_semantic_search(
         _load_matrix(conn)
         msg_mat = _cache.matrix
         msg_anchors = _cache.anchor_ids
+        msg_is_tom = _cache.is_tom
 
     with _doc_cache.lock:
         _load_doc_matrix(conn)
@@ -418,6 +473,12 @@ def mixed_semantic_search(
 
     if msg_mat is not None and msg_anchors is not None and q.size == msg_mat.shape[1]:
         scores = msg_mat @ q
+        # Boost windows anchored on Tom's own (featured-speaker) posts
+        # so his Discord voice competes with his video voice at the
+        # top of the ranker. Without this, community-dominated windows
+        # out-score Tom-authored windows on similar-phrasing queries.
+        if msg_is_tom is not None and msg_is_tom.shape[0] == scores.shape[0]:
+            scores = scores + msg_is_tom * _TOM_MSG_BOOST
         k = min(limit, scores.size)
         top = np.argpartition(-scores, k - 1)[:k]
         top = top[np.argsort(-scores[top])]
@@ -470,9 +531,10 @@ def mixed_semantic_search(
 
     if v_mat is not None and v_meta is not None and v_cids is not None \
             and q.size == v_mat.shape[1]:
-        # Tom B's own spoken teaching — give a strong boost, same tier as
-        # his authored PDFs, so video chunks surface when relevant.
-        vscores = v_mat @ q + 0.18
+        # Tom B's own spoken teaching — modest boost over raw cosine so
+        # videos surface when relevant, but no longer large enough to
+        # crowd out his Discord posts at the top of the mixed ranker.
+        vscores = v_mat @ q + _VIDEO_BOOST
         k = min(limit, vscores.size)
         top = np.argpartition(-vscores, k - 1)[:k]
         top = top[np.argsort(-vscores[top])]

@@ -1,14 +1,89 @@
 # Tom's Lab
 
-> Desktop app that turns the Bookmap Discord `traders-lab-tom-b` channel into a
-> smart, searchable study tool. AI-powered keyword / semantic / visual / chat
-> search over Tom B's teachings on market mechanics, order flow, and volume profile.
+Free desktop **library / searchable encyclopedia** of Tom B's
+publicly-shared teaching from the Bookmap Discord
+`traders-lab-tom-b` channel, his published reference PDFs, and his
+public YouTube uploads. Keyword, semantic, visual (chart-image),
+and conversational retrieval over a single local index. **Not** a
+trading tool, signals service, or strategy generator — a study
+reference.
 
-See [`toms_lab_prd.md`](toms_lab_prd.md) for the full product spec.
+Published by **SDE-Software (SDES.DEV)**.
+
+- **Users:** see [`USER_MANUAL.md`](USER_MANUAL.md) for installation
+  and operation.
+- **Developers:** product spec at [`toms_lab_prd.md`](toms_lab_prd.md);
+  build notes in this README.
+
+> **Tom B has not reviewed or endorsed this tool.** Tom's Lab is an
+> independent third-party project. The disclaimers shown in-app on
+> first launch are the binding terms; this README is summary.
+
+---
+
+## Policy
+
+Tom's Lab is a free, as-is utility. By installing or using the
+program, the user agrees to the following terms:
+
+- **Free tool, no warranty.** The software is provided without
+  warranty of any kind. There is no purchase, no licence fee, and no
+  service contract.
+- **Self-service only.** No one-on-one support, walkthroughs,
+  troubleshooting calls, or individual installation assistance is
+  provided. Everything required to operate the program is documented
+  in [`USER_MANUAL.md`](USER_MANUAL.md). Questions not answered there
+  are out of scope.
+- **User responsibility.** Installing the application, optional
+  components (Ollama, Gemini API key, GPU drivers), obtaining and
+  importing corpus material (Discord exports, YouTube content,
+  reference PDFs), and respecting the Terms of Service of the source
+  platforms are the user's responsibility.
+- **Discretionary updates.** Bug fixes and feature updates may be
+  released on an occasional, discretionary basis. No schedule is
+  guaranteed and no commitment to fix, respond to, or acknowledge
+  individual reports is made.
+- **Independent third party.** Tom's Lab is not affiliated with,
+  endorsed by, sponsored by, or connected to Tom B, Bookmap Ltd., the
+  Bookmap Discord, Discord Inc., Google, or any other third party
+  referenced elsewhere in the program.
+- **Not financial advice.** Tom's Lab is an experimental research
+  tool. All trading decisions, and any resulting gains or losses, are
+  the user's alone.
+
+This is the same support, warranty, and liability model used by
+SDE-Software's **BMBridge Lite**.
 
 ---
 
 ## Status
+
+**v0.1.0 — public release**. Ships as an Inno Setup installer
+(`TomsLab-Setup-0.1.0.exe`) on the project's release page. Not
+Authenticode-signed; SmartScreen will warn on first launch — see
+[`USER_MANUAL.md`](USER_MANUAL.md) §3.1.
+
+### What's in this build (recent fixes)
+
+- **Show in timeline** for any Discord citation now reaches messages
+  outside the recent-history window — older posts load via a
+  windowed view around the target.
+- **Sources sort toggle** in Ask Tom now reorders the answer body
+  (oldest-first walks Tom's evolution chronologically), not just
+  the source strip beneath it.
+- Top search bar (Keyword / Semantic / Visual) hides on tabs that
+  don't use it (Ask Tom, Docs, TomTube, Bookmarks).
+- Trimmed Ask-Tom sample prompts to questions grounded in Tom's
+  authored PDFs.
+- Cosmetic Feed/Ask-Tom polish: hover tooltip removed, "★ Tom"
+  pill no longer clips its descender, gallery search is faster on
+  broad queries.
+
+### Build history
+
+*Phase notes below are kept as a development changelog — the benchmark numbers cited in each phase reflect the corpus size at that point in time. Current corpus statistics are documented in [`demo/05_what_is_toms_lab.md`](demo/05_what_is_toms_lab.md).*
+
+**Phase 8 — PyInstaller + Inno Setup installer** ✅ (this release)
 
 **Phase 5 — Ask Tom conversational RAG** ✅
 - New "Ask Tom" tab with a chat interface. Each turn pulls the top
@@ -197,6 +272,10 @@ All user data lives under `%APPDATA%/TomsLab/` (never in the repo):
 | 7 | Bookmarks + first-run wizard |
 | 8 | PyInstaller + Inno Setup installer for handoff |
 
-## License
+## Licence
 
-MIT. See [LICENSE](LICENSE).
+Proprietary. Published by SDE-Software (SDES.DEV) as a free
+personal-use utility. Not open source. Redistribution, public
+hosting, commercial use, modification, and reverse engineering are
+prohibited without prior written consent. See [LICENSE](LICENSE)
+for the full terms.

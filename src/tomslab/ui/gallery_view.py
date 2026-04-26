@@ -14,7 +14,16 @@ from PyQt6.QtCore import (
     pyqtSignal,
 )
 from PyQt6.QtGui import QIcon, QPixmap, QPixmapCache
-from PyQt6.QtWidgets import QLabel, QListView, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import (
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QListView,
+    QMessageBox,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from tomslab import visual
 
@@ -247,6 +256,57 @@ class GalleryView(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
+        # --- bulk action bar (hidden until a selection exists) ----------
+        # Ctrl+click / shift+click / drag in the grid to multi-select,
+        # then one of these buttons acts on the whole selection at once.
+        self._bulk_bar = QWidget()
+        self._bulk_bar.setStyleSheet(
+            "QWidget { background: #2B2D31; border-bottom: 1px solid #3F4147; }"
+        )
+        bulk = QHBoxLayout(self._bulk_bar)
+        bulk.setContentsMargins(12, 6, 12, 6)
+        bulk.setSpacing(8)
+
+        self._bulk_label = QLabel("0 selected")
+        self._bulk_label.setStyleSheet("color: #DBDEE1; font-size: 12px;")
+        bulk.addWidget(self._bulk_label)
+        bulk.addStretch(1)
+
+        def _btn(label: str) -> QPushButton:
+            b = QPushButton(label)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setStyleSheet(
+                "QPushButton { background: transparent; color: #DBDEE1;"
+                " padding: 5px 12px; border: 1px solid #3F4147;"
+                " border-radius: 4px; font-size: 11px; }"
+                "QPushButton:hover { border-color: #DBDEE1; }"
+            )
+            return b
+
+        self._btn_export = _btn("Export selected…")
+        self._btn_export.setToolTip(
+            "Copy every selected chart file to a folder you pick.\n"
+            "Originals stay in Tom's Lab — this is a one-way export."
+        )
+        self._btn_export.clicked.connect(self._on_bulk_export)
+        bulk.addWidget(self._btn_export)
+
+        self._btn_bookmark = _btn("★ Bookmark source messages")
+        self._btn_bookmark.setToolTip(
+            "Star the Discord message each selected chart came from.\n"
+            "View them later in the Bookmarks tab."
+        )
+        self._btn_bookmark.clicked.connect(self._on_bulk_bookmark)
+        bulk.addWidget(self._btn_bookmark)
+
+        self._btn_clear = _btn("Clear selection")
+        self._btn_clear.setToolTip("Deselect all thumbnails.")
+        self._btn_clear.clicked.connect(self._on_bulk_clear)
+        bulk.addWidget(self._btn_clear)
+
+        self._bulk_bar.setVisible(False)
+        layout.addWidget(self._bulk_bar)
+
         self._list = QListView()
         self._list.setModel(self._model)
         self._list.setViewMode(QListView.ViewMode.IconMode)
@@ -257,15 +317,22 @@ class GalleryView(QWidget):
         self._list.setUniformItemSizes(True)
         self._list.setWordWrap(True)
         self._list.setGridSize(QSize(THUMB_SIZE + 12, THUMB_SIZE + 48))
-        self._list.setSelectionMode(QListView.SelectionMode.SingleSelection)
+        # Multi-select via Ctrl-click / Shift-click / drag-rubber-band.
+        # Single-click still works to pick one; double-click / Enter
+        # continues to open the full-size viewer via _on_activated.
+        self._list.setSelectionMode(QListView.SelectionMode.ExtendedSelection)
         self._list.setStyleSheet(
             "QListView { background: #1E1F22; color: #DBDEE1; border: none; }"
             "QListView::item { color: #DBDEE1; }"
+            "QListView::item:selected { background: #4E5058; color: white; }"
         )
         # Only listen to one activation signal — on Windows both
         # doubleClicked and activated fire for a double-click, which
         # would fire the handler twice and briefly open the viewer twice.
         self._list.activated.connect(self._on_activated)
+        self._list.selectionModel().selectionChanged.connect(
+            self._on_selection_changed
+        )
         layout.addWidget(self._list, stretch=1)
 
         self._empty_hint = QLabel(
@@ -323,3 +390,99 @@ class GalleryView(QWidget):
         path = self._model.data(idx, ROLE_PATH)
         if path:
             self.image_opened.emit(str(path))
+
+    # ---- multi-select bulk actions ------------------------------------
+    def _selected_rows(self) -> list[int]:
+        sm = self._list.selectionModel()
+        return sorted({idx.row() for idx in sm.selectedIndexes()})
+
+    def _selected_items(self) -> list[GalleryItem]:
+        rows = self._selected_rows()
+        out: list[GalleryItem] = []
+        for row in rows:
+            if 0 <= row < self._model.count():
+                out.append(self._model._items[row])
+        return out
+
+    def _on_selection_changed(self, *_ignored) -> None:
+        n = len(self._selected_rows())
+        self._bulk_bar.setVisible(n > 0)
+        self._bulk_label.setText(f"{n} selected")
+
+    def _on_bulk_clear(self) -> None:
+        self._list.clearSelection()
+
+    def _on_bulk_export(self) -> None:
+        """Copy every selected chart to a folder the user picks.
+        File names are preserved (with a numeric suffix if two selections
+        happen to share a filename — rare but possible when Discord
+        attaches the same base name across messages)."""
+        items = self._selected_items()
+        if not items:
+            return
+        target = QFileDialog.getExistingDirectory(
+            self, "Copy selected charts to folder",
+        )
+        if not target:
+            return
+        import shutil
+        from pathlib import Path
+        dst_root = Path(target)
+        copied = 0
+        errors: list[str] = []
+        for it in items:
+            src = Path(it.local_path)
+            if not src.exists():
+                errors.append(f"{src} (missing)")
+                continue
+            dst = dst_root / src.name
+            i = 1
+            while dst.exists():
+                dst = dst_root / f"{src.stem}__{i}{src.suffix}"
+                i += 1
+            try:
+                shutil.copy2(str(src), str(dst))
+                copied += 1
+            except Exception as exc:
+                errors.append(f"{src.name} — {exc}")
+        msg = f"Copied {copied} of {len(items)} charts to {target}"
+        if errors:
+            msg += f"\n\n{len(errors)} errors:\n- " + "\n- ".join(errors[:5])
+            if len(errors) > 5:
+                msg += f"\n(and {len(errors) - 5} more)"
+        QMessageBox.information(self, "Export complete", msg)
+
+    def _on_bulk_bookmark(self) -> None:
+        """Star every selected chart's source message so the user can
+        re-find them in the Bookmarks tab. Duplicates are silently
+        ignored — bookmarking an already-starred message is a no-op."""
+        items = self._selected_items()
+        if not items:
+            return
+        try:
+            from tomslab import bookmarks as bm
+        except Exception as exc:
+            QMessageBox.warning(self, "Bookmark failed", str(exc))
+            return
+        already_starred = bm.all_message_ids(self._conn)
+        added = 0
+        skipped = 0
+        for it in items:
+            if not it.message_id:
+                skipped += 1
+                continue
+            if it.message_id in already_starred:
+                skipped += 1
+                continue
+            now_on = bm.toggle_message(self._conn, it.message_id)
+            if now_on:
+                added += 1
+            else:
+                # toggle flipped off — shouldn't happen given the prefilter,
+                # but treat as skip.
+                skipped += 1
+        QMessageBox.information(
+            self, "Bookmarked",
+            f"{added} newly starred, {skipped} already-starred/skipped. "
+            f"See the Bookmarks tab."
+        )

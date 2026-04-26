@@ -1,21 +1,111 @@
-MIT License
+Tom's Lab — End User Licence Agreement
 
-Copyright (c) 2026 Tom's Lab contributors
+Copyright (c) 2026 SDE-Software (SDES.DEV). All rights reserved.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+Tom's Lab ("the Software") is proprietary software published by
+SDE-Software as a free personal-use utility. This is NOT open-source
+software. No rights are granted beyond those expressly stated below.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+1. LIMITED LICENCE TO USE
+
+SDE-Software grants you, the individual end user, a personal,
+non-exclusive, non-transferable, non-sublicensable, revocable
+licence to install and run one copy of the Software on personal
+devices that you own or control, for your own personal, non-
+commercial study and educational use.
+
+
+2. RESTRICTIONS — NOT PERMITTED WITHOUT WRITTEN CONSENT
+
+The following are expressly prohibited without prior written consent
+from SDE-Software:
+
+  a. Redistribution of the Software in any form — source code,
+     compiled binary, installer, data pack, or any component
+     thereof — whether original or modified, by any means
+     (file-sharing, mirroring, rehosting, bundling with other
+     software, peer-to-peer, physical media).
+
+  b. Public hosting of the Software, or of any service built on
+     top of the Software, including but not limited to SaaS,
+     web applications, browser-based clones, or API gateways
+     wrapping the Software's functionality.
+
+  c. Modification, reverse engineering, decompilation,
+     disassembly, or extraction of source or structural elements
+     of the Software, except to the narrow extent such activity
+     cannot be prohibited by applicable law.
+
+  d. Commercial use of the Software, its outputs, or its data
+     pack, including but not limited to: selling access, charging
+     subscription or licence fees, integrating the Software into
+     a paid product, or using the Software's outputs as the
+     substantive basis of a paid service, research report, or
+     other commercial deliverable.
+
+  e. Sublicensing, renting, leasing, lending, or assigning this
+     licence or any rights granted under it.
+
+  f. Removing, altering, or obscuring any copyright notice,
+     trademark, brand, attribution line, or the in-app
+     Disclaimer & Legal / Getting Started dialogs.
+
+
+3. INTELLECTUAL PROPERTY
+
+All right, title, and interest in and to the Software — including
+all copyrights, trademarks, trade secrets, and other intellectual
+property rights — are and shall remain the exclusive property of
+SDE-Software. This licence does not grant you any ownership
+interest in the Software.
+
+Bookmap (TM) is a trademark of Bookmap Ltd. and is referenced here
+solely to describe subject-matter context. Tom's Lab is independent
+software not affiliated with, endorsed by, or sponsored by Tom B,
+Bookmap Ltd., the Bookmap Discord, Discord Inc., Google LLC, or
+any other third party referenced in the Software.
+
+
+4. NO WARRANTY
+
+THE SOFTWARE IS PROVIDED "AS IS" AND "AS AVAILABLE", WITHOUT
+WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+PURPOSE, AND NON-INFRINGEMENT.
+
+
+5. LIMITATION OF LIABILITY
+
+IN NO EVENT SHALL SDE-SOFTWARE BE LIABLE FOR ANY INDIRECT,
+INCIDENTAL, SPECIAL, CONSEQUENTIAL, OR PUNITIVE DAMAGES, OR ANY
+LOSS OF PROFITS, DATA, OR TRADING LOSSES, ARISING FROM OR RELATING
+TO YOUR USE OF THE SOFTWARE, EVEN IF SDE-SOFTWARE HAS BEEN ADVISED
+OF THE POSSIBILITY OF SUCH DAMAGES.
+
+
+6. TERMINATION
+
+This licence terminates automatically if you breach any of its
+terms. On termination you must cease all use of the Software and
+destroy all copies in your possession.
+
+
+7. GOVERNING LAW
+
+This licence is governed by the laws of the country in which the
+publisher (SDE-Software / SDES.DEV) is legally resident. Any
+dispute arising from or relating to the Software shall be resolved
+in a court of competent jurisdiction within that country.
+
+
+8. CONTACT
+
+Questions about this licence, including requests for written
+consent to any of the restricted activities in section 2, should
+be directed to the publisher via https://sdes.dev.
+
+
+By installing or using the Software you acknowledge that you have
+read this licence, understand it, and agree to be bound by its
+terms.

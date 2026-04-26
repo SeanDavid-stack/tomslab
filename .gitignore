@@ -53,6 +53,12 @@ tom_docs/
 *.msi
 installer/output/
 
+# Release-pack output (12 GB+; data pack + signed installer go to Google Drive, not git)
+pack-out/
+
+# Claude Code session data and worktrees (local-only state)
+.claude/
+
 # Secrets
 .env
 *.key

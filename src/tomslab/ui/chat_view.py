@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSpinBox,
     QTextBrowser,
     QTextEdit,
     QVBoxLayout,
@@ -38,26 +39,22 @@ from tomslab.ui.chat_worker import ChatWorker
 
 
 SAMPLE_PROMPTS = [
-    # Concepts & definitions
+    # Every prompt below maps to one of Tom's authored PDFs in tom_docs/
+    # so the answer can ground in source material instead of guessing.
+    # Concepts & definitions (Glossary, AMT-101)
     "What is a Mean Reversion Structured Trade?",
     "What does Tom mean by 'absorption at VPOC'?",
     "Explain Naked VPOC (NVPOC) and why Tom watches for it.",
     "What's the difference between initiative and responsive activity?",
-    # Process / playbook
+    # Process / playbook (Opening Context Alignment, Market Structure)
     "How does Tom approach the opening?",
     "Walk me through Tom's Initial Balance (IB) playbook.",
     "How does Tom handle overnight inventory imbalance?",
     "What does Tom's Opening Context Alignment look like in practice?",
-    # Setups & tactics
+    # Setups & tactics (60 Structured Trades, Stats by Target)
     "What are the conditions for an HVN break-and-reject setup?",
     "How does Tom use VWAP and the Volume Profile together?",
     "When does Tom fade an IB extension vs trade the continuation?",
-    # Tools / environment
-    "What subscriptions do I need to replicate Tom's Investor/RT charts?",
-    "How do I export market levels from Investor/RT to Bookmap cloud notes?",
-    # Mindset & risk
-    "Summarize Tom's risk-management rules from his posts.",
-    "What does Tom say about trading psychology during drawdowns?",
 ]
 
 
@@ -243,18 +240,179 @@ class ChatView(QWidget):
         # Sources-panel sort toggle. Flips chip order newest↔oldest
         # across all past + future answers on click. Setting is persisted
         # per-user in the settings table as ``sources_sort_order``.
-        self._sort_toggle = QPushButton("")
-        self._sort_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._sort_toggle.setStyleSheet(
+        # Pill sizing: shared across every chip in this row so the bar
+        # reads as a coherent control strip. Bumped from the original
+        # 4px/11px to 7px/13px — the old size was too easy to miss and
+        # the targets were sub-minimum for comfortable clicking.
+        pill_base = (
+            # min-height carries the bold/descender combo through Qt's text
+            # centering. padding alone wasn't enough — Qt centers around the
+            # font's cap-height, not the descender extent, so the "y" in
+            # "only" got eaten by the rounded edge in checked-bold state.
             f"QPushButton {{ background: transparent; color: {COLOR_DIM};"
-            f" padding: 4px 10px; border: 1px solid {COLOR_BORDER};"
-            f" border-radius: 12px; font-size: 11px; }}"
+            f" padding: 6px 14px; border: 1px solid {COLOR_BORDER};"
+            f" border-radius: 12px; font-size: 13px;"
+            f" min-height: 24px; }}"
             f"QPushButton:hover {{ color: {COLOR_TEXT};"
             f" border-color: {COLOR_TEXT}; }}"
+        )
+
+        self._sort_toggle = QPushButton("")
+        self._sort_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._sort_toggle.setStyleSheet(pill_base)
+        self._sort_toggle.setToolTip(
+            "Click to flip between newest-first and oldest-first.\n"
+            "Applies to the retrieved Discord messages (what the AI sees)\n"
+            "AND the sources panel at the bottom of every answer."
         )
         self._sort_toggle.clicked.connect(self._toggle_sources_sort)
         self._refresh_sort_toggle_label()
         switch_row.addWidget(self._sort_toggle)
+
+        # "Tom only" toggle — when on, the retrieval pool collapses to
+        # messages flagged ``is_featured_speaker=1`` (i.e. Tom B's posts).
+        # Handy when the community thread is noisy and you want Tom's
+        # voice in isolation.
+        self._tom_only_toggle = QPushButton("")
+        self._tom_only_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._tom_only_toggle.setCheckable(True)
+        self._tom_only_toggle.setStyleSheet(
+            pill_base
+            + f"QPushButton:checked {{ background: {COLOR_AUTHOR_TOM};"
+            f" color: #1E1F22; border-color: {COLOR_AUTHOR_TOM}; font-weight: 600; }}"
+        )
+        self._tom_only_toggle.setToolTip(
+            "When ON, Ask Tom ignores every community message and\n"
+            "answers only from Tom B.'s own posts, PDFs, and videos.\n"
+            "Turn OFF to include valuable community charts and replies."
+        )
+        self._tom_only_toggle.clicked.connect(self._toggle_tom_only)
+        switch_row.addWidget(self._tom_only_toggle)
+
+        # "Videos only" — redirect the whole context window at Tom's
+        # YouTube transcripts, skipping Discord and PDFs. Clean for
+        # topics where his spoken teaching is authoritative and the
+        # chatter / documentation is just noise.
+        self._videos_only_toggle = QPushButton("")
+        self._videos_only_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._videos_only_toggle.setCheckable(True)
+        self._videos_only_toggle.setStyleSheet(
+            pill_base
+            + f"QPushButton:checked {{ background: #ED4245;"
+            f" color: white; border-color: #ED4245; font-weight: 600; }}"
+        )
+        self._videos_only_toggle.setToolTip(
+            "When ON, Ask Tom answers only from YouTube video transcripts.\n"
+            "Discord messages and PDFs are skipped entirely. The full\n"
+            "context budget goes to video chunks (24 normal, 40 deep).\n"
+            "Use when you want Tom's spoken teaching in isolation."
+        )
+        self._videos_only_toggle.clicked.connect(self._toggle_videos_only)
+        switch_row.addWidget(self._videos_only_toggle)
+
+        # "Discord only" — symmetric counterpart to Videos-only. Redirects
+        # the context window at Discord conversation windows, skips
+        # videos + PDFs. Useful for questions about channel banter, live-
+        # trading narration, or Tom's back-and-forth with the community.
+        self._discord_only_toggle = QPushButton("")
+        self._discord_only_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._discord_only_toggle.setCheckable(True)
+        self._discord_only_toggle.setStyleSheet(
+            pill_base
+            + f"QPushButton:checked {{ background: #5865F2;"
+            f" color: white; border-color: #5865F2; font-weight: 600; }}"
+        )
+        self._discord_only_toggle.setToolTip(
+            "When ON, Ask Tom answers only from Discord conversation\n"
+            "windows. Videos and PDFs are skipped entirely. Useful for\n"
+            "questions about live-trading narration or community\n"
+            "back-and-forth. Mutually exclusive with Videos only."
+        )
+        self._discord_only_toggle.clicked.connect(self._toggle_discord_only)
+        switch_row.addWidget(self._discord_only_toggle)
+
+        # Per-cohort hit-count spinboxes. Tiny inline editors — no dialog.
+        # Values persist to settings so subsequent questions use them.
+        # Arrow buttons are hidden with setButtonSymbols(NoButtons) so
+        # the number has the full field width — user scrolls or types
+        # to change the value. Before this, Qt's default arrow buttons
+        # were overlapping the digits on narrow spinboxes.
+        spin_style = (
+            f"QSpinBox {{ background: {COLOR_BG_ALT}; color: {COLOR_TEXT};"
+            f" border: 1px solid {COLOR_BORDER}; border-radius: 12px;"
+            f" padding: 4px 12px; font-size: 15px; font-weight: 600;"
+            f" min-height: 26px;"
+            f" selection-background-color: {COLOR_AUTHOR_TOM}; }}"
+            f"QSpinBox:focus {{ border-color: {COLOR_AUTHOR_TOM}; }}"
+        )
+        label_style = f"color: {COLOR_DIM}; font-size: 13px;"
+
+        self._k_tom_label = QLabel("Tom:")
+        self._k_tom_label.setStyleSheet(label_style)
+        switch_row.addWidget(self._k_tom_label)
+        from PyQt6.QtWidgets import QAbstractSpinBox
+        self._k_tom_spin = QSpinBox()
+        # Cap at 50 per cohort. Gemini (1M context) handles this easily;
+        # Ollama's 8K context starts truncating past ~25 sources total.
+        # If the user dials this way up on Ollama they'll see thinner
+        # answers as context gets dropped — we don't silently override
+        # their choice, we trust them to adjust.
+        self._k_tom_spin.setRange(0, 50)
+        self._k_tom_spin.setFixedWidth(56)
+        self._k_tom_spin.setButtonSymbols(
+            QAbstractSpinBox.ButtonSymbols.NoButtons
+        )
+        self._k_tom_spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._k_tom_spin.setStyleSheet(spin_style)
+        self._k_tom_spin.setToolTip(
+            "How many of Tom B.'s Discord messages to pull as evidence\n"
+            "per question. Max 50. Type a number or press ↑ / ↓.\n"
+            "\n"
+            "Gemini (cloud) can handle 50+ comfortably.\n"
+            "Ollama (local) has an 8K context window — past ~25 total\n"
+            "sources (Tom + Others + videos + docs) the oldest ones\n"
+            "get truncated and answer quality drops."
+        )
+        self._k_tom_spin.valueChanged.connect(
+            lambda v: dbmod.set_setting(self._conn, "chat_k_discord_tom", str(v))
+        )
+        switch_row.addWidget(self._k_tom_spin)
+
+        self._k_other_label = QLabel("Others:")
+        self._k_other_label.setStyleSheet(label_style)
+        switch_row.addWidget(self._k_other_label)
+        self._k_other_spin = QSpinBox()
+        self._k_other_spin.setRange(0, 50)
+        self._k_other_spin.setFixedWidth(56)
+        self._k_other_spin.setButtonSymbols(
+            QAbstractSpinBox.ButtonSymbols.NoButtons
+        )
+        self._k_other_spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._k_other_spin.setStyleSheet(spin_style)
+        self._k_other_spin.setToolTip(
+            "How many community (non-Tom) Discord messages to pull\n"
+            "per question. Max 50. Set to 0 to lean Tom-only.\n"
+            "Ignored entirely while 'Tom only' is on."
+        )
+        self._k_other_spin.valueChanged.connect(
+            lambda v: dbmod.set_setting(self._conn, "chat_k_discord_other", str(v))
+        )
+        switch_row.addWidget(self._k_other_spin)
+
+        self._refresh_tom_only_controls()
+
+        # "Recent" opens a dropdown of past questions — one click
+        # re-populates the input field so the user can tweak and re-ask.
+        self._recent_btn = QPushButton("↺ Recent")
+        self._recent_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._recent_btn.setStyleSheet(pill_base)
+        self._recent_btn.setToolTip(
+            "Shows up to 30 recent questions. Click one to drop it back\n"
+            "into the input field (doesn't auto-send — tweak first).\n"
+            "History is auto-saved on every answer."
+        )
+        self._recent_btn.clicked.connect(self._show_recent_menu)
+        switch_row.addWidget(self._recent_btn)
 
         self._provider_hint = QLabel("")
         self._provider_hint.setStyleSheet(f"color: {COLOR_DIM}; font-size: 10px;")
@@ -389,7 +547,33 @@ class ChatView(QWidget):
             f"QPushButton:disabled {{ background: {COLOR_BORDER}; color: {COLOR_DIM}; }}"
             f"QPushButton:hover:!disabled {{ background: #4752C4; }}"
         )
+        self._send_btn.setToolTip(
+            "Quick answer — retrieves 30-ish sources and returns a\n"
+            "short, focused response. Ctrl+Enter to send."
+        )
         button_col.addWidget(self._send_btn)
+
+        # "Deep Dive" — 3× wider retrieval + structured-briefing prompt.
+        # Takes longer (20-60s) but produces a much more thorough,
+        # well-structured answer with headings, direct quotes, and
+        # citations spread across Discord + PDFs + YouTube.
+        self._deep_btn = QPushButton("🔍 Deep Dive")
+        self._deep_btn.clicked.connect(self._on_deep_dive_clicked)
+        self._deep_btn.setStyleSheet(
+            f"QPushButton {{ background: {COLOR_AUTHOR_TOM}; color: #1E1F22;"
+            f" padding: 10px 18px; border: none; border-radius: 8px;"
+            f" font-weight: 600; font-size: 12px; }}"
+            f"QPushButton:disabled {{ background: {COLOR_BORDER}; color: {COLOR_DIM}; }}"
+            f"QPushButton:hover:!disabled {{ background: #FFD87A; }}"
+        )
+        self._deep_btn.setToolTip(
+            "Research briefing mode — pulls 3× as many sources from\n"
+            "Discord, PDFs, and YouTube, then asks the AI to write a\n"
+            "long structured briefing with headings, direct quotes,\n"
+            "and broad citations. Takes ~30-60 seconds vs ~5 seconds\n"
+            "for a normal Ask."
+        )
+        button_col.addWidget(self._deep_btn)
 
         self._clear_btn = QPushButton("Clear")
         self._clear_btn.clicked.connect(self.clear_history)
@@ -447,17 +631,44 @@ class ChatView(QWidget):
         self._transcript.setHtml(body)
 
     def _render_transcript(self) -> None:
+        # Find the index of the last user turn so we can anchor scroll
+        # right before it — the natural reading flow is "latest question
+        # at the top of the viewport, answer flows down as you read".
+        # Previously we scrolled to the END of the document which landed
+        # on the footer of the last answer, forcing the user to scroll
+        # back up to read the answer from its start.
+        last_user_idx: int | None = None
+        for i in range(len(self._history) - 1, -1, -1):
+            if self._history[i].role == "user":
+                last_user_idx = i
+                break
+
         parts = []
-        for turn in self._history:
+        for i, turn in enumerate(self._history):
             if turn.role == "user":
-                parts.append(self._render_user(turn.content))
+                anchor = ""
+                if i == last_user_idx:
+                    anchor = '<a name="latest-turn"></a>'
+                parts.append(anchor + self._render_user(turn.content))
             else:
                 parts.append(self._render_assistant(turn.content))
         self._transcript.setHtml("\n".join(parts))
-        # scroll to bottom
-        cur = self._transcript.textCursor()
-        cur.movePosition(QTextCursor.MoveOperation.End)
-        self._transcript.setTextCursor(cur)
+
+        if last_user_idx is not None:
+            # Defer the scroll one event-loop tick: QTextBrowser's
+            # layout isn't finalised at the moment setHtml returns,
+            # so scrollToAnchor on the same call sometimes lands a
+            # few pixels off. A 0-ms single-shot fires after layout.
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(
+                0, lambda: self._transcript.scrollToAnchor("latest-turn")
+            )
+        else:
+            # First render (empty history / empty-state prompts) —
+            # fall back to top of document.
+            cur = self._transcript.textCursor()
+            cur.movePosition(QTextCursor.MoveOperation.Start)
+            self._transcript.setTextCursor(cur)
 
     @staticmethod
     def _avatar_html(letter: str, color: str) -> str:
@@ -484,17 +695,65 @@ class ChatView(QWidget):
         body = self._linkify_citations(text, labels)
         sources_panel = self._sources_panel_html(text, labels)
         avatar = self._avatar_html("T", COLOR_AUTHOR_TOM)
-        # Each assistant turn gets a "Save answer" link in its footer —
-        # encodes the index in history so _on_anchor_clicked can look up
-        # the right (question, answer) pair to persist.
         idx = len(self._history) - 1
+
+        # ---- Disclaimer normalisation --------------------------------
+        # The system prompt asks the LLM to end chart-aware answers with:
+        #   "⚠️ **This is an experimental research tool — not financial
+        #    advice.** Verify everything independently. You alone are
+        #    responsible for your trading decisions."
+        # In a long chat session the same 3-line paragraph repeating in
+        # every answer is noise. We still show it on the FIRST answer as
+        # a styled callout. On subsequent answers we collapse it into a
+        # small muted chip so it's always present (legal visibility) but
+        # doesn't dominate the flow.
+        import re as _re
+        disclaimer_re = _re.compile(
+            r"⚠️\s*\*\*[^*]*experimental research tool[^*]*\*\*[^\n]*"
+            r"(?:\n[^\n]*)?(?:\n[^\n]*)?",
+            _re.IGNORECASE,
+        )
+        first_turn = (idx == 0)
+        if first_turn:
+            body = disclaimer_re.sub(
+                (
+                    f'<div style="margin: 12px 0 0 0; padding: 10px 12px;'
+                    f' background: #3A2318; border-left: 3px solid #ED4245;'
+                    f' border-radius: 6px; font-size: 11px; color: #F2B8B5;'
+                    f' line-height: 1.5;">'
+                    f'⚠️ <b>Experimental research tool — not financial advice.</b> '
+                    f'Verify everything independently. You alone are responsible '
+                    f'for your trading decisions.'
+                    f'</div>'
+                ),
+                body,
+            )
+        else:
+            body = disclaimer_re.sub(
+                (
+                    f'<div style="margin: 10px 0 0 0; font-size: 10px;'
+                    f' color: {COLOR_DIM};">'
+                    f'⚠️ Research tool · Not financial advice · Verify independently'
+                    f'</div>'
+                ),
+                body,
+            )
+
+        # Each assistant turn gets a "Save answer" + "Export" + "Re-ask"
+        # row in its footer. idx is encoded into hrefs so
+        # _on_anchor_clicked can look up the right (question, answer)
+        # pair to persist or re-run.
         save_footer = (
-            f'<div style="margin-left: 38px; margin-top: 6px;">'
+            f'<div style="margin-left: 38px; margin-top: 8px;'
+            f' display: flex; gap: 16px;">'
             f'<a href="save:{idx}" style="color: {COLOR_DIM}; text-decoration: none;'
-            f' font-size: 11px;">⭐ Save this answer</a>'
+            f' font-size: 11px;">⭐ Save</a>'
+            f'&nbsp;&nbsp;·&nbsp;&nbsp;'
+            f'<a href="reask:{idx}" style="color: {COLOR_DIM};'
+            f' text-decoration: none; font-size: 11px;">↻ Re-ask with…</a>'
             f'&nbsp;&nbsp;·&nbsp;&nbsp;'
             f'<a href="export:{idx}" style="color: {COLOR_DIM};'
-            f' text-decoration: none; font-size: 11px;">📥 Export…</a>'
+            f' text-decoration: none; font-size: 11px;">📥 Export</a>'
             f'</div>'
         )
         return (
@@ -502,10 +761,10 @@ class ChatView(QWidget):
             f'<div style="margin-bottom: 6px;">{avatar}'
             f'<span style="color: {COLOR_AUTHOR_TOM}; font-weight: 600;">'
             f'Tom\'s Lab</span></div>'
-            f'<div style="margin-left: 38px; padding: 12px 16px;'
+            f'<div style="margin-left: 38px; padding: 14px 18px;'
             f' background: {COLOR_BG_ALT}; border-left: 3px solid {COLOR_AUTHOR_TOM};'
             f' border-radius: 8px; color: {COLOR_TEXT}; white-space: pre-wrap;'
-            f' line-height: 1.55;">{body}</div>'
+            f' line-height: 1.6;">{body}</div>'
             f'{sources_panel}'
             f'{save_footer}'
             '</div>'
@@ -520,7 +779,9 @@ class ChatView(QWidget):
         buckets: dict[str, list[str]] = {"msg": [], "doc": [], "vid": []}
         seen: dict[str, set[str]] = {"msg": set(), "doc": set(), "vid": set()}
         for m in CITATION_RE.finditer(text or ""):
-            kind, raw = m.group(1), m.group(2)
+            # Lowercase the kind so LLMs writing "[Doc:123]" / "[VID:4]"
+            # still bucket correctly — regex is now case-insensitive.
+            kind, raw = m.group(1).lower(), m.group(2)
             if kind not in buckets:
                 continue
             if raw in seen[kind]:
@@ -610,7 +871,7 @@ class ChatView(QWidget):
             start, end = m.span()
             if start > last_end:
                 out.append(html.escape(text[last_end:start]))
-            kind, raw = m.group(1), m.group(2)
+            kind, raw = m.group(1).lower(), m.group(2)
             href = f"{kind}:{raw}"
             friendly = labels.get(href)
             if not friendly:
@@ -684,7 +945,7 @@ class ChatView(QWidget):
         doc_ids: set[str] = set()
         vid_chunk_ids: set[str] = set()
         for m in CITATION_RE.finditer(text or ""):
-            kind, raw = m.group(1), m.group(2)
+            kind, raw = m.group(1).lower(), m.group(2)
             if kind == "msg":
                 msg_ids.add(raw)
             elif kind == "doc":
@@ -834,20 +1095,32 @@ class ChatView(QWidget):
         # Kick off the elapsed-time ticker so the user sees progress.
         self._think_started = time.time()
         has_image = bool(self._attachment_paths)
-        self._status.setText(
-            "Thinking… 0:00"
-            + ("   (vision model — first call may take 30–90s)" if has_image else "")
-        )
+        deep = getattr(self, "_next_ask_is_deep", False)
+        if deep:
+            self._status.setText(
+                "🔍 Researching across ~90 sources… 0:00  "
+                "(deep dives take longer — grab a coffee)"
+            )
+        else:
+            self._status.setText(
+                "Thinking… 0:00"
+                + ("   (vision model — first call may take 30–90s)"
+                   if has_image else "")
+            )
         self._think_timer.start()
 
         attachments = list(self._attachment_paths)
         self._worker = ChatWorker(
             question, self._history[:-1],
-            attachment_paths=attachments or None, parent=self,
+            attachment_paths=attachments or None,
+            deep=deep,
+            parent=self,
         )
         self._worker.answered.connect(self._on_answered)
         self._worker.failed.connect(self._on_failed)
         self._worker.start()
+        # Reset the deep flag — next Ask click defaults to normal mode.
+        self._next_ask_is_deep = False
         # Consume the attachment — a single ask uses it once.
         self._clear_attachment()
 
@@ -896,6 +1169,35 @@ class ChatView(QWidget):
             f"{n_src} sources · {n_cites} citations{tail}{took} · Ctrl+Enter to send"
         )
 
+        # Auto-record into rolling chat history so the Recent menu can
+        # surface this question later. Bookmarks remain a separate
+        # explicit-save path.
+        question = ""
+        for t in reversed(self._history[:-1]):
+            if t.role == "user":
+                question = t.content
+                break
+        try:
+            from tomslab import chat_history as hist
+            # result.citations is already list[str] in "kind:id" form
+            # (see chat.py line ~797). No tuple-unpacking needed.
+            citation_strs = list(result.citations or [])
+            hist.record(
+                self._conn,
+                question=question,
+                answer=content,
+                citations=citation_strs,
+            )
+        except Exception as _hist_exc:
+            # History recording is non-critical — never block the UI
+            # on it. But we DO want it in the log so recurring misses
+            # (e.g. DB lock contention during a heavy background job)
+            # stop being invisible.
+            import logging as _log
+            _log.warning(
+                "chat_history.record failed (non-fatal): %s", _hist_exc
+            )
+
     def _on_failed(self, err: str) -> None:
         self._think_timer.stop()
         self._worker = None
@@ -930,6 +1232,10 @@ class ChatView(QWidget):
             self._send_btn.setEnabled(True)
             self._send_btn.setText("Ask")
             self._send_btn.setStyleSheet(self._SEND_STYLE)
+        # Deep Dive button: disabled while a worker is active — second
+        # request would fight the first. Re-enabled when idle.
+        if hasattr(self, "_deep_btn"):
+            self._deep_btn.setEnabled(not busy)
         self._input.setReadOnly(busy)
 
     def _on_send_or_cancel(self) -> None:
@@ -938,6 +1244,25 @@ class ChatView(QWidget):
         if self._worker is not None and self._worker.isRunning():
             self._cancel_worker()
             return
+        self._on_send()
+
+    def _on_deep_dive_clicked(self) -> None:
+        """Deep Dive: set the per-ask flag, then trigger the normal send
+        path. The flag is consumed inside _on_send when the worker is
+        built, and reset to False afterwards so the *next* click falls
+        back to normal mode unless the user clicks Deep Dive again.
+        """
+        if self._worker is not None and self._worker.isRunning():
+            # Can't start a second request — tell the user.
+            self._status.setText(
+                "Already asking — cancel first, or wait for the answer."
+            )
+            return
+        if not (self._input.toPlainText() or "").strip():
+            self._status.setText("Type a question first.")
+            self._input.setFocus()
+            return
+        self._next_ask_is_deep = True
         self._on_send()
 
     def _cancel_worker(self) -> None:
@@ -1015,6 +1340,88 @@ class ChatView(QWidget):
         label = ("Sources: newest first" if self._sources_sort_order() == "newest"
                  else "Sources: oldest first")
         self._sort_toggle.setText(f"{arrow}  {label}")
+
+    # ---- Tom-only / per-cohort hit count ------------------------------
+    def _tom_only_enabled(self) -> bool:
+        return (dbmod.get_setting(self._conn, "chat_tom_only", "0")
+                or "0") == "1"
+
+    def _toggle_tom_only(self) -> None:
+        new = "0" if self._tom_only_enabled() else "1"
+        dbmod.set_setting(self._conn, "chat_tom_only", new)
+        self._refresh_tom_only_controls()
+
+    # ---- Videos-only toggle ------------------------------------------
+    def _videos_only_enabled(self) -> bool:
+        return (dbmod.get_setting(self._conn, "chat_videos_only", "0")
+                or "0") == "1"
+
+    def _toggle_videos_only(self) -> None:
+        new = "0" if self._videos_only_enabled() else "1"
+        dbmod.set_setting(self._conn, "chat_videos_only", new)
+        # Mutually exclusive with Discord-only; turning one on clears
+        # the other so the UI matches the backend's videos_only-wins
+        # convention.
+        if new == "1":
+            dbmod.set_setting(self._conn, "chat_discord_only", "0")
+        self._refresh_tom_only_controls()   # also refreshes this toggle's state
+
+    # ---- Discord-only toggle -----------------------------------------
+    def _discord_only_enabled(self) -> bool:
+        return (dbmod.get_setting(self._conn, "chat_discord_only", "0")
+                or "0") == "1"
+
+    def _toggle_discord_only(self) -> None:
+        new = "0" if self._discord_only_enabled() else "1"
+        dbmod.set_setting(self._conn, "chat_discord_only", new)
+        if new == "1":
+            dbmod.set_setting(self._conn, "chat_videos_only", "0")
+        self._refresh_tom_only_controls()
+
+    def _refresh_tom_only_controls(self) -> None:
+        """Refresh every source-mode control (Tom only, Videos only,
+        Tom/Others spinboxes) to match the current settings. All
+        controls stay fully interactive regardless of combination —
+        the retrieve() logic handles every permutation, so there's
+        no benefit to disabling any of them. Previously the Tom-only
+        pill was disabled while Videos-only was on, which made users
+        feel trapped when they wanted to flip the other setting first.
+        """
+        on = self._tom_only_enabled()
+        self._tom_only_toggle.setChecked(on)
+        # Label has no descender — earlier "Tom only" got its "y" clipped
+        # by the rounded pill in bold/checked state across multiple QSS
+        # padding tweaks. The star alone signals the active state.
+        self._tom_only_toggle.setText("★ Tom" if on else "Tom")
+        if hasattr(self, "_videos_only_toggle"):
+            v_on = self._videos_only_enabled()
+            self._videos_only_toggle.setChecked(v_on)
+            self._videos_only_toggle.setText("📹 Videos only")
+        if hasattr(self, "_discord_only_toggle"):
+            d_on = self._discord_only_enabled()
+            self._discord_only_toggle.setChecked(d_on)
+            self._discord_only_toggle.setText("💬 Discord only")
+        # When Tom-only is on, the 'Others' spinbox is irrelevant —
+        # dim it so the affordance is obvious. Its value is still
+        # preserved for when the user switches off.
+        self._k_other_spin.setEnabled(not on)
+        self._k_other_label.setEnabled(not on)
+        # Load current values into the spinboxes (only once per refresh
+        # — avoid re-firing valueChanged → set_setting round-trips).
+        try:
+            k_tom = int(dbmod.get_setting(self._conn, "chat_k_discord_tom", "5") or 5)
+        except ValueError:
+            k_tom = 5
+        try:
+            k_other = int(dbmod.get_setting(self._conn, "chat_k_discord_other", "4") or 4)
+        except ValueError:
+            k_other = 4
+        self._k_tom_spin.blockSignals(True)
+        self._k_tom_spin.setValue(k_tom)
+        self._k_tom_spin.blockSignals(False)
+        self._k_other_spin.blockSignals(True)
+        self._k_other_spin.setValue(k_other)
+        self._k_other_spin.blockSignals(False)
 
     def _rerender_transcript(self) -> None:
         """Rebuild the whole transcript HTML from self._history so a UI
@@ -1181,6 +1588,12 @@ class ChatView(QWidget):
         if href.startswith("export:"):
             self._export_answer(href[len("export:"):])
             return
+        if href.startswith("reask:"):
+            self._reask(href[len("reask:"):])
+            return
+        if href.startswith("history:"):
+            self._jump_to_history(href[len("history:"):])
+            return
         m = re.match(r"^(msg|doc|vid):(.+)$", href)
         if not m:
             return
@@ -1201,9 +1614,9 @@ class ChatView(QWidget):
             ).fetchone()
             if row is None:
                 return
-            import webbrowser
             from tomslab.chat import _youtube_link
-            webbrowser.open(_youtube_link(row["url"] or "", float(row["ss"] or 0.0)))
+            from tomslab.ui.browser_open import open_browser
+            open_browser(_youtube_link(row["url"] or "", float(row["ss"] or 0.0)))
             return
         self.citation_clicked.emit(kind, raw)
 
@@ -1223,14 +1636,109 @@ class ChatView(QWidget):
             if self._history[j].role == "user":
                 question = self._history[j].content
                 break
+        # findall returns (kind, id) tuples per the two capture groups.
+        # Lowercase kind so citations from case-sloppy LLMs normalise.
         citations = list(CITATION_RE.findall(answer_turn.content))
-        citation_strs = [f"{kind}:{raw}" for kind, raw in citations]
+        citation_strs = [f"{kind.lower()}:{raw}" for kind, raw in citations]
         bmmod.save_chat_answer(
             self._conn, question, answer_turn.content, citation_strs
         )
         self._status.setText(
             f"⭐ Saved — view it in the Bookmarks tab · Ctrl+Enter to ask again"
         )
+
+    # ---- recent-questions dropdown + re-ask ---------------------------
+    def _show_recent_menu(self) -> None:
+        """Dropdown of the most recent 30 questions from chat history.
+        Click to drop the question back into the input for re-asking —
+        doesn't auto-send so the user can tweak settings / wording first.
+        Includes a 'Clear history' footer action."""
+        from PyQt6.QtWidgets import QMenu
+        from tomslab import chat_history as hist
+
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            f"QMenu {{ background: {COLOR_BG_ALT}; color: {COLOR_TEXT};"
+            f" border: 1px solid {COLOR_BORDER}; padding: 4px; }}"
+            f"QMenu::item {{ padding: 6px 14px; }}"
+            f"QMenu::item:selected {{ background: {COLOR_BORDER}; }}"
+        )
+        try:
+            entries = hist.recent(self._conn, limit=30)
+        except Exception:
+            entries = []
+        if not entries:
+            act = menu.addAction("(no history yet)")
+            act.setEnabled(False)
+        else:
+            for e in entries:
+                # Truncate for the menu label — show full on hover.
+                label = e.question.strip().replace("\n", " ")
+                if len(label) > 80:
+                    label = label[:77] + "…"
+                date = e.asked_at[:10] if e.asked_at else ""
+                tom_tag = " · Tom-only" if e.tom_only else ""
+                act = menu.addAction(f"{label}   ({date}{tom_tag})")
+                act.setToolTip(e.question)
+                act.triggered.connect(
+                    lambda _checked=False, q=e.question: self._populate_input(q)
+                )
+            menu.addSeparator()
+            clear_act = menu.addAction("🗑  Clear history")
+            clear_act.triggered.connect(self._clear_history_from_menu)
+        # Pop up right under the Recent button.
+        pos = self._recent_btn.mapToGlobal(
+            self._recent_btn.rect().bottomLeft()
+        )
+        menu.exec(pos)
+
+    def _populate_input(self, question: str) -> None:
+        self._input.setPlainText(question)
+        self._input.setFocus()
+        # Move cursor to end so the user can append instead of overwriting.
+        cursor = self._input.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        self._input.setTextCursor(cursor)
+
+    def _clear_history_from_menu(self) -> None:
+        from PyQt6.QtWidgets import QMessageBox
+        from tomslab import chat_history as hist
+        if QMessageBox.question(
+            self, "Clear chat history",
+            "Wipe all recent-question history? "
+            "Saved answers (Bookmarks tab) are unaffected.",
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        n = hist.clear(self._conn)
+        self._status.setText(f"Cleared {n} history entries.")
+
+    def _reask(self, idx_str: str) -> None:
+        """Re-ask link on each answer: puts the original question back
+        into the input field so the user can adjust Tom-only / K / model
+        and re-send."""
+        try:
+            idx = int(idx_str)
+        except ValueError:
+            return
+        if idx < 0 or idx >= len(self._history):
+            return
+        question = ""
+        for j in range(idx - 1, -1, -1):
+            if self._history[j].role == "user":
+                question = self._history[j].content
+                break
+        if question:
+            self._populate_input(question)
+            self._status.setText(
+                "Question loaded — tweak settings (Tom-only / K / model) "
+                "then Ctrl+Enter to re-ask"
+            )
+
+    def _jump_to_history(self, entry_id_str: str) -> None:
+        """Reserved for a future sidebar list that links directly to a
+        DB history entry by id. Currently unused — the Recent dropdown
+        re-populates by question text, not by history id."""
+        pass
 
     def _export_answer(self, idx_str: str) -> None:
         """Write the question + answer + resolved sources to a file the
@@ -1292,7 +1800,7 @@ class ChatView(QWidget):
         # Replace each [kind:ID] with "[label]" so the exported file is
         # readable without the app to resolve citations.
         def _repl(m):
-            kind, raw = m.group(1), m.group(2)
+            kind, raw = m.group(1).lower(), m.group(2)
             friendly = labels.get(f"{kind}:{raw}") or f"{kind}:{raw}"
             return f"[{friendly}]"
         body = CITATION_RE.sub(_repl, answer)
@@ -1301,7 +1809,7 @@ class ChatView(QWidget):
         buckets: dict[str, list[str]] = {"msg": [], "doc": [], "vid": []}
         seen: dict[str, set[str]] = {"msg": set(), "doc": set(), "vid": set()}
         for m in CITATION_RE.finditer(answer):
-            kind, raw = m.group(1), m.group(2)
+            kind, raw = m.group(1).lower(), m.group(2)
             if kind in buckets and raw not in seen[kind]:
                 seen[kind].add(raw)
                 buckets[kind].append(raw)
@@ -1342,14 +1850,24 @@ class ChatView(QWidget):
         return "\n".join(lines)
 
     def _export_pdf(self, path, question: str, answer: str) -> None:
-        """Render the Markdown export as PDF via Qt's QTextDocument.
-        Uses the in-app linkification so citation pills render as colored
-        text in the PDF too."""
+        """Render the answer as a PDF with clickable external links.
+
+        Qt's PDF printer preserves ``<a href="...">`` as clickable
+        hyperlinks, so every citation that has a meaningful external
+        URL — YouTube videos with a ``&t=`` timestamp jump, Discord
+        permalinks for Tom's posts — becomes a one-click jump from
+        the exported file. Doc citations (local PDFs) stay as plain
+        text since there's no meaningful external URL for them.
+        """
         from PyQt6.QtGui import QTextDocument
         from PyQt6.QtPrintSupport import QPrinter
         labels = self._resolve_citation_labels(answer)
         body_html = self._linkify_citations(answer, labels)
         sources_html = self._sources_panel_html(answer, labels)
+        # Convert internal hrefs (vid:/msg:/doc:) to real URLs.
+        body_html    = self._rewrite_links_for_export(body_html)
+        sources_html = self._rewrite_links_for_export(sources_html)
+
         from datetime import datetime
         html_doc = (
             f"<h1>{(question or 'Tom&apos;s Lab answer')}</h1>"
@@ -1369,6 +1887,94 @@ class ChatView(QWidget):
         printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
         printer.setOutputFileName(str(path))
         doc.print(printer)
+
+    def _rewrite_links_for_export(self, html_fragment: str) -> str:
+        """Replace internal ``href="vid:chunk_id"`` / ``href="msg:id"`` /
+        ``href="doc:page_id"`` with real external URLs so the PDF's
+        clickable links go somewhere useful when opened outside the app.
+
+        * ``vid:chunk_id``  → ``https://youtube.com/watch?v=...&t=STARTs``
+          (Tom's exact YouTube moment the citation refers to)
+        * ``msg:msg_id``    → ``https://discord.com/channels/GUILD/CHANNEL/MSG``
+          (Discord permalink; only works for users who have access to
+          the server, but harmless otherwise)
+        * ``doc:page_id``   → stripped of the anchor (no meaningful
+          external URL for a locally-rendered PDF page)
+        """
+        import re as _re
+        import sqlite3 as _sq
+
+        # Collect every internal id we need to resolve from the
+        # fragment. One query per kind keeps this cheap even for
+        # exports with many citations.
+        vid_ids: set[str] = set()
+        msg_ids: set[str] = set()
+        for m in _re.finditer(
+            r'href="(vid|msg|doc):([A-Za-z0-9_\-]+)"',
+            html_fragment, _re.IGNORECASE,
+        ):
+            k = m.group(1).lower()
+            raw = m.group(2)
+            if k == "vid":
+                vid_ids.add(raw)
+            elif k == "msg":
+                msg_ids.add(raw)
+
+        vid_url: dict[str, str] = {}
+        if vid_ids:
+            try:
+                from tomslab.chat import _youtube_link
+                placeholders = ",".join("?" * len(vid_ids))
+                rows = self._conn.execute(
+                    f"SELECT c.id AS cid, v.url AS u, c.start_sec AS ss "
+                    f"  FROM video_chunks c JOIN videos v ON v.id=c.video_id "
+                    f" WHERE c.id IN ({placeholders})",
+                    list(vid_ids),
+                ).fetchall()
+                for r in rows:
+                    url = _youtube_link(r["u"] or "", float(r["ss"] or 0.0))
+                    if url:
+                        vid_url[str(r["cid"])] = url
+            except _sq.Error:
+                pass
+
+        msg_url: dict[str, str] = {}
+        if msg_ids:
+            try:
+                placeholders = ",".join("?" * len(msg_ids))
+                rows = self._conn.execute(
+                    f"SELECT id, guild_id, channel_id FROM messages "
+                    f" WHERE id IN ({placeholders})",
+                    list(msg_ids),
+                ).fetchall()
+                for r in rows:
+                    gid = r["guild_id"]
+                    cid = r["channel_id"]
+                    mid = r["id"]
+                    if gid and cid and mid:
+                        msg_url[mid] = (
+                            f"https://discord.com/channels/{gid}/{cid}/{mid}"
+                        )
+            except _sq.Error:
+                pass
+
+        def _repl(m: "_re.Match") -> str:
+            kind = m.group(1).lower()
+            raw = m.group(2)
+            if kind == "vid" and raw in vid_url:
+                return f'href="{vid_url[raw]}"'
+            if kind == "msg" and raw in msg_url:
+                return f'href="{msg_url[raw]}"'
+            # doc: or unresolved → remove the href so the anchor becomes
+            # plain colored text in the PDF (no dead link).
+            return 'href="#"'
+
+        return _re.sub(
+            r'href="(vid|msg|doc):([A-Za-z0-9_\-]+)"',
+            _repl,
+            html_fragment,
+            flags=_re.IGNORECASE,
+        )
 
 
 # ---------------------------------------------------------------------------

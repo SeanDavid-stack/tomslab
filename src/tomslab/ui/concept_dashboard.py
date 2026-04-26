@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import html
 import sqlite3
-import webbrowser
 from typing import Callable
+
+from tomslab.ui.browser_open import open_browser
 
 from PyQt6.QtCore import Qt, QUrl
 from PyQt6.QtWidgets import (
@@ -267,8 +268,8 @@ class ConceptDashboard(QDialog):
             ).fetchone()
             if row:
                 from tomslab.chat import _youtube_link
-                webbrowser.open(_youtube_link(row["url"] or "",
-                                              float(row["ss"] or 0.0)))
+                open_browser(_youtube_link(row["url"] or "",
+                                           float(row["ss"] or 0.0)))
             return
         if ":" in href and self._on_citation:
             kind, raw = href.split(":", 1)

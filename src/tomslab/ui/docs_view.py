@@ -236,7 +236,11 @@ class DocsView(QWidget):
             self._doc_list.setCurrentRow(0)
         else:
             self._heading.setText("No documents ingested yet")
-            self._subheading.setText("")
+            self._subheading.setText(
+                "Drop Tom's PDFs into the app's data/docs folder — they'll "
+                "be ingested on next launch. OCR + semantic indexing runs "
+                "automatically in the background."
+            )
             self._model.load_document(None)
 
     # ------------------------------------------------------------------

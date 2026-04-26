@@ -19,3 +19,7 @@ easyocr>=1.7
 # Phase 7 — web source ingest (Linnsoft forum and similar).
 beautifulsoup4>=4.12
 requests>=2.31
+# Shippable data-pack (tar.zst). Pure-Python bindings to libzstd so no
+# system install is needed on Windows. Used by packaging/build_data_pack.py
+# and the in-app File → Install data pack… flow.
+zstandard>=0.22

@@ -1,12 +1,14 @@
 """First-run setup wizard — optional guided tour for new users.
 
 Shows on the very first launch (after the Getting Started & Policy
-dialog) if the user has no ingested content yet. Four quick steps:
+dialog) if the user has no ingested content yet. Steps:
 
-  1. Explain the ingest model (user-owned, nothing auto-fetches)
-  2. Point at the Discord ingest workflow
-  3. Point at the PDFs folder
-  4. Point at the TomTube folder-import (as the recommended path)
+  1. Data pack — the quick-start path for users who downloaded a
+     pre-built corpus alongside the app.
+  2. Explain the ingest model (user-owned, nothing auto-fetches).
+  3. Point at the Discord ingest workflow.
+  4. Point at the PDFs folder.
+  5. Point at the TomTube folder-import (as the recommended path).
 
 Every step has a 'Skip' option — nothing is mandatory. The wizard
 records completion in settings so it doesn't re-appear on future
@@ -65,6 +67,7 @@ class FirstRunWizard(QDialog):
         outer.addWidget(self._progress)
 
         self._stack = QStackedWidget()
+        self._stack.addWidget(self._page_data_pack())
         self._stack.addWidget(self._page_intro())
         self._stack.addWidget(self._page_discord())
         self._stack.addWidget(self._page_pdfs())
@@ -129,6 +132,27 @@ class FirstRunWizard(QDialog):
         lay.addWidget(body)
         lay.addStretch(1)
         return w
+
+    def _page_data_pack(self) -> QWidget:
+        return self._make_page(
+            "Quick start — install a data pack",
+            "<p>If you downloaded a <b>data pack</b> "
+            "(<code>.tar.zst</code>) alongside the app, that's the "
+            "fastest way to get started. The pack contains a pre-built "
+            "corpus — Discord messages, PDFs, YouTube transcripts, and "
+            "embeddings all ready to search.</p>"
+            "<ol>"
+            "<li>Close this wizard (click <b>Skip setup</b> below).</li>"
+            "<li>Go to <b>File → Install data pack…</b></li>"
+            "<li>Pick the <code>.tar.zst</code> file you downloaded.</li>"
+            "</ol>"
+            "<p>The app will verify the download, back up any existing "
+            "data, extract the pack, and reload every tab. Typical "
+            "install time is under a minute on an SSD.</p>"
+            "<p>No data pack? Continue to the next page — the remaining "
+            "steps walk through importing content yourself from Discord, "
+            "PDFs, and YouTube.</p>"
+        )
 
     def _page_intro(self) -> QWidget:
         return self._make_page(

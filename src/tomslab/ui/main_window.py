@@ -56,6 +56,7 @@ from tomslab.ui.detail_dialog import DetailDialog
 from tomslab.ui.docs_view import DocsView
 from tomslab.ui.embed_worker import EmbedWorker
 from tomslab.ui.gallery_view import GalleryView, ROLE_PATH as GALLERY_ROLE_PATH
+from tomslab.ui.chart_classifier_worker import ChartClassifierWorker
 from tomslab.ui.image_embed_worker import ImageEmbedWorker
 from tomslab.ui.image_viewer import ImageViewerDialog
 from tomslab.ui.import_worker import ImportWorker
@@ -64,6 +65,7 @@ from tomslab.ui.message_model import MAX_BROWSE_ROWS, MessageListModel, ROLE_MES
 from tomslab.ui.settings_dialog import SettingsDialog
 from tomslab.ui.video_view import TomTubeView
 from tomslab.ui.video_worker import VideoIngestWorker
+from tomslab.ui.youtube_check_worker import YouTubeCheckWorker
 
 
 # cap the image cache so 10K messages worth of charts don't eat all RAM
@@ -110,26 +112,29 @@ class MainWindow(QMainWindow):
         self._worker: ImportWorker | None = None
         self._embed_worker: EmbedWorker | None = None
         self._image_embed_worker: ImageEmbedWorker | None = None
+        self._chart_classifier_worker: ChartClassifierWorker | None = None
         self._image_viewer: ImageViewerDialog | None = None
         self._detail_dialog: DetailDialog | None = None
         self._video_worker: VideoIngestWorker | None = None
+        self._youtube_check_worker: YouTubeCheckWorker | None = None
         self._keepalive_worker = None   # tomslab.ingest.youtube_keepalive.KeepAliveWorker
+        self._update_thread = None      # tomslab.ui.update_dialog.UpdateCheckThread
 
         self._search_debounce = QTimer(self)
         self._search_debounce.setSingleShot(True)
-        self._search_debounce.setInterval(250)
+        # 400 ms gives even a slow CLIP text-embed (visual mode) one keystroke's
+        # worth of slack before re-running. The Feed/Gallery still update fast
+        # enough for the box to feel responsive while you finish typing.
+        self._search_debounce.setInterval(400)
         self._search_debounce.timeout.connect(self._apply_search)
 
         self._build_menu()
         self._build_ui()
         self._refresh_status()
 
-        # First-run: require an affirmative 'I agree' click on the full
-        # Disclaimer before the app is usable. Click-wrap > browse-wrap
-        # for enforceability. Gated by a settings key so it only fires
-        # the first time.
-        if dbmod.get_setting(self._conn, "disclaimer_accepted", "") != "yes":
-            QTimer.singleShot(300, self._show_first_run_policy)
+        # First-run disclaimer is fired from showEvent (not here) so it
+        # opens AFTER the splash screen — the splash uses
+        # WindowStaysOnTopHint and previously hid the dialog behind it.
 
     def _show_first_run_policy(self) -> None:
         # Order on first launch:
@@ -217,6 +222,8 @@ class MainWindow(QMainWindow):
         dance — otherwise ``self.show()`` inside the helper re-enters
         showEvent and we infinite-recurse into a RecursionError."""
         super().showEvent(event)
+        if hasattr(self, "_jobs_panel"):
+            self._position_jobs_panel()
         if getattr(self, "_foregrounded_once", False):
             return
         self._foregrounded_once = True
@@ -224,6 +231,38 @@ class MainWindow(QMainWindow):
         # toggling window flags; calling setWindowFlags() mid-showEvent
         # can also trigger a second showEvent.
         QTimer.singleShot(0, self._force_foreground)
+        QTimer.singleShot(1500, self._maybe_start_update_check)
+        # Warm the semantic + visual in-memory matrices on a background
+        # thread so the first Ask Tom query and first Gallery visual
+        # search are instant instead of paying a 3-5 second disk-read
+        # lazy-load cost the user feels as a hang. 800ms delay lets the
+        # window paint and becomes responsive before we lean on the
+        # disk + numpy.
+        QTimer.singleShot(800, self._start_prewarm)
+        # First-run disclaimer / Getting Started gate. Fires from showEvent
+        # (not __init__) so it opens AFTER the splash has been dismissed —
+        # the splash uses WindowStaysOnTopHint and would otherwise cover
+        # the dialog. 200 ms gives Qt's own show handling time to settle.
+        if dbmod.get_setting(self._conn, "disclaimer_accepted", "") != "yes":
+            QTimer.singleShot(200, self._show_first_run_policy)
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        if hasattr(self, "_jobs_panel"):
+            self._position_jobs_panel()
+
+    def _position_jobs_panel(self) -> None:
+        """Anchor the Jobs panel to the bottom-right corner, just above
+        the status bar. The panel has a fixed width (320px) and whatever
+        height its rows need, so we only need to pin its bottom-right
+        corner."""
+        panel = self._jobs_panel
+        panel.adjustSize()
+        margin = 14
+        status_h = self.statusBar().height() if self.statusBar() else 0
+        x = self.width() - panel.width() - margin
+        y = self.height() - panel.height() - status_h - margin
+        panel.move(max(0, x), max(0, y))
 
     def _force_foreground(self) -> None:
         """Bring the window in front of other apps. Qt-on-Windows idiom:
@@ -239,40 +278,80 @@ class MainWindow(QMainWindow):
         menu = self.menuBar()
         file_menu = menu.addMenu("&File")
 
-        import_action = QAction("&Import DCE JSON…", self)
+        # ---- Import submenu ----------------------------------------------
+        # Everything that brings data IN. Grouped so the top-level menu
+        # stays scannable — the old flat list had 12+ items.
+        import_menu = file_menu.addMenu("&Import")
+
+        import_action = QAction("Discord export (&DCE JSON)…", self)
         import_action.setShortcut(QKeySequence("Ctrl+I"))
         import_action.triggered.connect(self._on_import_clicked)
-        file_menu.addAction(import_action)
+        import_menu.addAction(import_action)
+
+        self._import_folder_action = QAction(
+            "YouTube videos from a &folder… (recommended)", self
+        )
+        self._import_folder_action.triggered.connect(self._on_import_video_folder)
+        import_menu.addAction(self._import_folder_action)
+
+        self._ingest_youtube_action = QAction(
+            "YouTube directly (experimental)…", self
+        )
+        self._ingest_youtube_action.triggered.connect(self._on_ingest_youtube)
+        import_menu.addAction(self._ingest_youtube_action)
+
+        self._check_youtube_action = QAction("Check for new Tom videos", self)
+        self._check_youtube_action.triggered.connect(self._on_check_new_youtube)
+        import_menu.addAction(self._check_youtube_action)
+
+        import_menu.addSeparator()
+        self._signin_youtube_action = QAction("Check TomTube download setup…", self)
+        self._signin_youtube_action.triggered.connect(self._on_signin_youtube)
+        import_menu.addAction(self._signin_youtube_action)
+
+        # ---- Process submenu --------------------------------------------
+        # Everything that transforms ingested data (embeddings, scoring).
+        process_menu = file_menu.addMenu("&Process")
+
+        self._build_embed_action = QAction("Build &text embeddings…", self)
+        self._build_embed_action.triggered.connect(self._on_build_embeddings)
+        process_menu.addAction(self._build_embed_action)
+
+        self._build_image_embed_action = QAction(
+            "Build &image (CLIP) embeddings…", self
+        )
+        self._build_image_embed_action.triggered.connect(self._on_build_image_embeddings)
+        process_menu.addAction(self._build_image_embed_action)
+
+        self._classify_charts_action = QAction(
+            "Classify Discord images (charts vs junk)…", self
+        )
+        self._classify_charts_action.triggered.connect(self._on_classify_charts)
+        process_menu.addAction(self._classify_charts_action)
+
+        # ---- Review submenu ---------------------------------------------
+        # Everything that opens a curation / housekeeping UI.
+        review_menu = file_menu.addMenu("&Review")
+
+        self._review_charts_action = QAction(
+            "Review chart classifications…", self
+        )
+        self._review_charts_action.triggered.connect(self._on_review_charts)
+        review_menu.addAction(self._review_charts_action)
+
+        self._purge_discarded_action = QAction(
+            "Purge discarded images from disk…", self
+        )
+        self._purge_discarded_action.triggered.connect(self._on_purge_discarded)
+        review_menu.addAction(self._purge_discarded_action)
 
         file_menu.addSeparator()
 
-        self._build_embed_action = QAction("&Build text embeddings…", self)
-        self._build_embed_action.triggered.connect(self._on_build_embeddings)
-        file_menu.addAction(self._build_embed_action)
+        install_pack_action = QAction("&Install data pack…", self)
+        install_pack_action.triggered.connect(self._on_install_data_pack)
+        file_menu.addAction(install_pack_action)
 
-        self._build_image_embed_action = QAction("Build &image (CLIP) embeddings…", self)
-        self._build_image_embed_action.triggered.connect(self._on_build_image_embeddings)
-        file_menu.addAction(self._build_image_embed_action)
-
-        self._import_folder_action = QAction(
-            "Import videos from &folder… (recommended)", self
-        )
-        self._import_folder_action.triggered.connect(self._on_import_video_folder)
-        file_menu.addAction(self._import_folder_action)
-
-        self._signin_youtube_action = QAction("Check TomTube &direct-download setup…", self)
-        self._signin_youtube_action.triggered.connect(self._on_signin_youtube)
-        file_menu.addAction(self._signin_youtube_action)
-
-        self._ingest_youtube_action = QAction(
-            "Import &YouTube directly (experimental)…", self
-        )
-        self._ingest_youtube_action.triggered.connect(self._on_ingest_youtube)
-        file_menu.addAction(self._ingest_youtube_action)
-
-        self._check_youtube_action = QAction("Check for &new Tom videos", self)
-        self._check_youtube_action.triggered.connect(self._on_check_new_youtube)
-        file_menu.addAction(self._check_youtube_action)
+        file_menu.addSeparator()
 
         settings_action = QAction("&Settings…", self)
         settings_action.setShortcut(QKeySequence("Ctrl+,"))
@@ -293,9 +372,19 @@ class MainWindow(QMainWindow):
         study_menu.addAction(daily_action)
 
         help_menu = menu.addMenu("&Help")
+
+        corpus_health_action = QAction("🩺 &Corpus Health Check…", self)
+        corpus_health_action.triggered.connect(self._show_corpus_health)
+        help_menu.addAction(corpus_health_action)
+        help_menu.addSeparator()
         getting_started_action = QAction("&Getting Started && Policy", self)
         getting_started_action.triggered.connect(self._show_getting_started)
         help_menu.addAction(getting_started_action)
+
+        self._check_updates_action = QAction("Check for &Updates…", self)
+        self._check_updates_action.triggered.connect(self._show_update_dialog)
+        help_menu.addAction(self._check_updates_action)
+        self._refresh_update_menu_label()
 
         about_action = QAction("&About", self)
         about_action.triggered.connect(self._show_about)
@@ -406,6 +495,11 @@ class MainWindow(QMainWindow):
         )
         bar.addWidget(self._mode_combo)
         outer.addLayout(bar)
+        # Default tab is Ask Tom, which doesn't use the top search bar —
+        # hide it on launch so users don't type into a no-op input.
+        # _on_tab_changed re-shows it when Feed or Gallery becomes active.
+        self._search.setVisible(False)
+        self._mode_combo.setVisible(False)
 
         # --- concept chips (Tom's glossary) ----------------------------
         self._concept_bar = ConceptChipBar(self._conn, self)
@@ -416,10 +510,14 @@ class MainWindow(QMainWindow):
 
         # --- empty state hint ------------------------------------------
         self._empty_hint = QLabel(
-            "No messages yet. Drag a DCE JSON file here, or File → Import DCE JSON (Ctrl+I)."
+            "No messages yet.\n\n"
+            "Drag a DiscordChatExporter JSON file onto this window,\n"
+            "or use File → Import → Discord export (Ctrl+I)."
         )
         self._empty_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._empty_hint.setStyleSheet("color: #949BA4; padding: 40px;")
+        self._empty_hint.setStyleSheet(
+            "color: #DBDEE1; font-size: 14px; padding: 60px; line-height: 1.6;"
+        )
         outer.addWidget(self._empty_hint)
 
         # --- feed tab --------------------------------------------------
@@ -479,6 +577,21 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(central)
 
+        # Jobs panel — anchored bottom-right above the status bar.
+        # Shows every background job (transcription, embedding, classify,
+        # ingest) in one place with live progress + ETA. Auto-hides when
+        # nothing is running.
+        from tomslab.ui.jobs_panel import JobsPanel
+        self._jobs_panel = JobsPanel(self)
+        self._jobs_panel.raise_()
+        # Reposition on resize so it stays in the bottom-right corner.
+        self._position_jobs_panel()
+
+        # Desktop toast notifications — init once so long-running workers
+        # can announce completion without requiring the app to be focused.
+        from tomslab.ui.notifications import prime_tray
+        prime_tray(self)
+
         # status bar
         sb = QStatusBar()
         self._status_label = QLabel("")
@@ -525,19 +638,30 @@ class MainWindow(QMainWindow):
             self._gallery.set_query(query)
         elif query:
             self._gallery.set_query("")   # no CLIP query in these modes
-            # Pull the matching message ids out of the model's row cache.
+            # Pull the matching message ids out of the model's row cache,
+            # then top up from the raw search ids for results that haven't
+            # been paged in yet. Set-based dedup — the previous list-based
+            # ``not in`` was O(n²) and stalled the UI on broad searches.
             ids: list[str] = []
+            seen: set[str] = set()
             for row in range(self._model.rowCount()):
                 r = self._model.data(self._model.index(row, 0), ROLE_MESSAGE)
-                if r is not None and not r.doc_meta:
+                if r is not None and not r.doc_meta and r.id not in seen:
+                    seen.add(r.id)
                     ids.append(r.id)
-            # If we've only loaded the first page, top up from the raw search ids.
             raw = getattr(self._model, "_search_ids", [])
             for rid in raw:
-                if rid and rid.startswith("msg:"):
+                if not rid:
+                    continue
+                if rid.startswith("msg:"):
                     mid = rid[4:]
-                    if mid not in ids:
-                        ids.append(mid)
+                elif rid.startswith("doc:"):
+                    continue    # PDF pages aren't gallery items
+                else:
+                    mid = rid    # keyword/visual store bare message ids
+                if mid and mid not in seen:
+                    seen.add(mid)
+                    ids.append(mid)
             self._gallery.set_message_scope(ids)
         else:
             self._gallery.set_query("")
@@ -699,6 +823,13 @@ class MainWindow(QMainWindow):
 
     def _on_tab_changed(self, _idx: int) -> None:
         cur = self._tabs.currentWidget()
+        # Top search bar (text + mode dropdown) only drives Feed and
+        # Gallery — hide it on tabs that have their own search or none,
+        # so users don't type into it expecting Ask Tom / Docs / TomTube
+        # / Bookmarks to react.
+        uses_top_search = cur in (self._list, self._gallery)
+        self._search.setVisible(uses_top_search)
+        self._mode_combo.setVisible(uses_top_search)
         if cur is self._gallery:
             mode_str = self._mode_combo.currentData() or "keyword"
             if mode_str == "visual":
@@ -788,9 +919,11 @@ class MainWindow(QMainWindow):
     def _jump_to_message(self, message_id: str) -> None:
         """Switch to Feed and scroll to a specific Discord message.
 
-        Uses an O(1) SQL rank lookup rather than iterating loaded pages,
-        so jumping to a message from 2021 is as fast as jumping to
-        yesterday's. Loads pages up to that rank lazily and scrolls.
+        Fast path: the message lies within the recent browse cap, so we
+        compute its rank with one SQL count and lazily fetch pages up to
+        it. Slow path (older messages, or hidden by the noise filter):
+        we put the model into a synthetic window mode that loads ~200
+        messages around the target, bypassing the cap.
         """
         from PyQt6.QtCore import QModelIndex, QTimer
 
@@ -807,33 +940,39 @@ class MainWindow(QMainWindow):
             log.warning("rank lookup failed for %s: %s", message_id, exc)
             rank = None
 
-        if rank is None:
-            # Message isn't in the DB, or the noise filter hid it, or
-            # rank is past the 10K browse cap. Fall back to the popover.
+        # Try the fast path only when the rank is reachable through the
+        # browse cap. Otherwise drop straight to the window-mode fallback
+        # so the user actually sees the message in context.
+        if rank is not None and rank < self._model.total_loadable():
+            root = QModelIndex()
+            max_iterations = 60    # at 200 rows/page that's 12K rows = the full cap
+            while (
+                self._model.rowCount() <= rank
+                and self._model.canFetchMore(root)
+                and max_iterations > 0
+            ):
+                self._model.fetchMore(root)
+                max_iterations -= 1
+
+            if rank < self._model.rowCount():
+                idx = self._model.index(rank, 0)
+                if idx.isValid():
+                    self._list.scrollTo(idx, hint=QListView.ScrollHint.PositionAtCenter)
+                    self._list.setCurrentIndex(idx)
+                    self._delegate.flash_message(message_id)
+                    self._list.viewport().update()
+                    QTimer.singleShot(2300, self._clear_flash)
+                    return
+
+        target_row = self._model.show_window_around(message_id)
+        if target_row is None:
             self._show_message_detail(message_id)
             return
 
-        # Lazily load model pages until we've covered the target rank or
-        # we run out of data. Bounded to prevent runaway fetches.
-        root = QModelIndex()
-        max_iterations = 60    # at 200 rows/page that's 12K rows = the full cap
-        while (
-            self._model.rowCount() <= rank
-            and self._model.canFetchMore(root)
-            and max_iterations > 0
-        ):
-            self._model.fetchMore(root)
-            max_iterations -= 1
-
-        if rank >= self._model.rowCount():
-            self._show_message_detail(message_id)
-            return
-
-        idx = self._model.index(rank, 0)
+        idx = self._model.index(target_row, 0)
         if not idx.isValid():
             self._show_message_detail(message_id)
             return
-
         self._list.scrollTo(idx, hint=QListView.ScrollHint.PositionAtCenter)
         self._list.setCurrentIndex(idx)
         self._delegate.flash_message(message_id)
@@ -1108,29 +1247,411 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "Image embedding failed", err)
         self._refresh_status()
 
+    # ---- chart classifier (charts vs junk) ----------------------------
+    def _on_classify_charts(self) -> None:
+        """Run the two-stage chart classifier over all undecided
+        attachments. Stage 1 applies cheap size/format/dedup rules;
+        stage 2 runs CLIP zero-shot scoring on what remains.
+        Rows are not deleted — they're just tagged in the DB. The
+        separate Review and Purge actions handle review + disk cleanup.
+        """
+        if self._chart_classifier_worker is not None and \
+                self._chart_classifier_worker.isRunning():
+            QMessageBox.information(
+                self, "Already running",
+                "Chart classification is already in progress."
+            )
+            return
+        from tomslab.ingest import chart_classifier
+        pending = chart_classifier.pending_classify_count(self._conn)
+        if pending == 0:
+            QMessageBox.information(
+                self, "Nothing to classify",
+                "Every attachment already has a chart decision. "
+                "Use 'Review chart classifications…' to see them."
+            )
+            return
+        reply = QMessageBox.question(
+            self,
+            "Classify chart images",
+            f"Classify {pending:,} Discord images as chart vs non-chart?\n\n"
+            "Stage 1 is a fast size/format filter (seconds).\n"
+            "Stage 2 uses CLIP on the survivors — roughly 1 hour for "
+            "every ~40,000 images on a 3080-class GPU. Runs in the "
+            "background — the app stays usable.\n\n"
+            "No files are deleted. You'll review the middle band after, "
+            "then explicitly purge discarded images.",
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Ok,
+        )
+        if reply != QMessageBox.StandardButton.Ok:
+            return
+
+        self._progress_bar.setVisible(True)
+        self._progress_bar.setRange(0, 0)
+        self._status_label.setText("Classifying charts…")
+
+        self._chart_classifier_worker = ChartClassifierWorker(self)
+        self._chart_classifier_worker.progress.connect(
+            self._on_classify_charts_progress
+        )
+        self._chart_classifier_worker.finished_ok.connect(
+            self._on_classify_charts_finished
+        )
+        self._chart_classifier_worker.failed.connect(
+            self._on_classify_charts_failed
+        )
+        self._chart_classifier_worker.start()
+
+    def _on_classify_charts_progress(
+        self, done: int, total: int, status: str
+    ) -> None:
+        if total > 0:
+            self._progress_bar.setRange(0, total)
+            self._progress_bar.setValue(done)
+        self._status_label.setText(f"Charts: {status}")
+
+    def _on_classify_charts_finished(self, counts: dict) -> None:
+        self._progress_bar.setVisible(False)
+        self._chart_classifier_worker = None
+        self._refresh_status()
+        pref = counts.get("prefilter", {})
+        clip = counts.get("clip", {})
+        summary = (
+            f"Pre-filter: {pref.get('small', 0):,} tiny, "
+            f"{pref.get('gif', 0):,} gif, "
+            f"{pref.get('dedup_keep', 0) + pref.get('dedup_discard', 0):,} dedup.\n"
+            f"CLIP scored: {clip.get('scored', 0):,} images → "
+            f"{clip.get('auto_keep', 0):,} auto-kept, "
+            f"{clip.get('auto_discard', 0):,} auto-discarded, "
+            f"{clip.get('review', 0):,} need review.\n\n"
+            "Open File → Review chart classifications to eyeball "
+            "the borderline cases."
+        )
+        QMessageBox.information(self, "Chart classification done", summary)
+
+    def _on_classify_charts_failed(self, err: str) -> None:
+        self._progress_bar.setVisible(False)
+        self._chart_classifier_worker = None
+        QMessageBox.critical(self, "Chart classification failed", err)
+        self._refresh_status()
+
+    def _on_review_charts(self) -> None:
+        from tomslab.ui.chart_review import ChartReviewDialog
+        dlg = ChartReviewDialog(self._conn, parent=self)
+        dlg.exec()
+
+    def _on_purge_discarded(self) -> None:
+        """Move every attachment flagged 'discard' or 'auto_discard' into
+        a ``_discarded/`` sibling folder. Reversible — nothing is hard-
+        deleted. Updates ``attachments.local_path`` to point at the new
+        location so Tom's Lab knows where each file is if we ever want
+        to un-discard. User can empty ``_discarded/`` from File Explorer
+        when they're ready to reclaim disk space."""
+        row = self._conn.execute(
+            """
+            SELECT COUNT(*) AS n, COALESCE(SUM(file_size), 0) AS bytes
+              FROM attachments
+             WHERE chart_decision IN ('discard','auto_discard')
+               AND local_path IS NOT NULL AND local_path != ''
+            """
+        ).fetchone()
+        n = int(row["n"] or 0)
+        size_mb = (int(row["bytes"] or 0)) / (1024 * 1024)
+        if n == 0:
+            QMessageBox.information(
+                self, "Nothing to purge",
+                "No images are flagged 'discard'. Classify or review "
+                "images first."
+            )
+            return
+        reply = QMessageBox.question(
+            self,
+            "Purge discarded images",
+            f"Move {n:,} discarded images (~{size_mb:,.0f} MB) into a "
+            f"`_discarded/` folder next to your Discord export?\n\n"
+            "Files are NOT deleted — they're relocated so you can "
+            "recover them from File Explorer if you change your mind. "
+            "Empty that folder yourself to actually reclaim disk.",
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Ok,
+        )
+        if reply != QMessageBox.StandardButton.Ok:
+            return
+
+        self._status_label.setText("Purging discarded images…")
+        QApplication.processEvents()
+        try:
+            from tomslab.ingest.chart_classifier_purge import purge_discarded
+            moved, errors = purge_discarded(self._conn)
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "Purge failed", f"{type(exc).__name__}: {exc}"
+            )
+            self._refresh_status()
+            return
+        self._refresh_status()
+        msg = f"Moved {moved:,} files into _discarded/ folders."
+        if errors:
+            msg += f"\n\n{len(errors)} files could not be moved (see logs)."
+        QMessageBox.information(self, "Purge complete", msg)
+
+    # ---- data pack install --------------------------------------------
+    def _any_worker_running(self) -> bool:
+        """True if any long-running job is active. The install flow has to
+        refuse-on-busy because it closes the DB and renames data/."""
+        for w in (self._worker, self._embed_worker, self._image_embed_worker,
+                  self._chart_classifier_worker, self._video_worker,
+                  self._youtube_check_worker):
+            if w is not None and w.isRunning():
+                return True
+        return False
+
+    def _on_install_data_pack(self) -> None:
+        """Replace the local data dir with the contents of a data pack
+        (.tar.zst) produced by ``packaging/build_data_pack.py``. The
+        current data dir is renamed to ``data.backup-<timestamp>/`` first,
+        so a botched extract never wipes the user's existing data."""
+        from tomslab import data_pack_install as dp
+
+        if self._any_worker_running():
+            QMessageBox.warning(
+                self, "Background jobs running",
+                "Wait for ingest / embed / classify / video workers to "
+                "finish before installing a data pack."
+            )
+            return
+
+        pack_str, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select a Tom's Lab data pack",
+            str(Path.home()),
+            "Data packs (*.tar.zst)",
+        )
+        if not pack_str:
+            return
+        pack_path = Path(pack_str)
+
+        try:
+            manifest = dp.read_manifest(pack_path)
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "Unreadable pack",
+                f"Could not read the archive: {type(exc).__name__}: {exc}"
+            )
+            return
+
+        release = manifest.release_date if manifest else "(unknown date)"
+        version = manifest.app_version_min if manifest else ""
+        compressed = (
+            f" — {manifest.compressed_bytes / (1024 * 1024):,.0f} MB compressed"
+            if manifest else ""
+        )
+        reply = QMessageBox.question(
+            self,
+            "Install data pack",
+            f"Replace your current Tom's Lab data with data pack "
+            f"from {release}?{compressed}\n\n"
+            f"Your existing data will be backed up to "
+            f"<code>data.backup-&lt;timestamp&gt;/</code> first, so you "
+            f"can roll back by renaming it.",
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if reply != QMessageBox.StandardButton.Ok:
+            return
+
+        # Close DB handles across all views — SQLite on Windows keeps a
+        # write lock that blocks the directory rename otherwise.
+        try:
+            self._chat.shutdown()
+        except Exception:
+            pass
+        try:
+            self._conn.close()
+        except Exception:
+            pass
+
+        self._progress_bar.setVisible(True)
+        self._progress_bar.setRange(0, 0)
+        self._status_label.setText("Installing data pack…")
+        QApplication.processEvents()
+
+        try:
+            def _pg(done: int, total: int, status: str) -> None:
+                self._status_label.setText(status)
+                QApplication.processEvents()
+            result = dp.install_pack(pack_path, progress=_pg)
+        except (dp.IncompatibleAppVersion, dp.PackHashMismatch) as exc:
+            # Pre-flight failures — nothing was renamed or extracted, so
+            # skip the "data was restored" line that applies only to
+            # post-extract failures.
+            self._progress_bar.setVisible(False)
+            try:
+                self._conn = dbmod.connect()
+                dbmod.initialise(self._conn)
+                self._propagate_new_conn()
+            except Exception:
+                pass
+            title = ("App update required"
+                     if isinstance(exc, dp.IncompatibleAppVersion)
+                     else "Download verification failed")
+            QMessageBox.warning(self, title, str(exc))
+            self._refresh_status()
+            return
+        except Exception as exc:
+            self._progress_bar.setVisible(False)
+            QMessageBox.critical(
+                self, "Install failed",
+                f"{type(exc).__name__}: {exc}\n\n"
+                "Your existing data was restored from the backup."
+            )
+            # Re-open the connection we closed above so the rest of the
+            # session keeps working against the untouched old DB.
+            try:
+                self._conn = dbmod.connect()
+                dbmod.initialise(self._conn)
+                self._propagate_new_conn()
+            except Exception:
+                pass
+            self._refresh_status()
+            return
+
+        # Re-open against the freshly-installed DB and refresh every view.
+        self._conn = dbmod.connect()
+        dbmod.initialise(self._conn)
+        self._propagate_new_conn()
+
+        # Drop every in-memory cache so Ask Tom / Gallery / Docs reload
+        # from the new embeddings.
+        try:
+            semantic.invalidate_all_caches()
+            visual.invalidate_all_caches()
+        except Exception:
+            pass
+
+        # Refresh the pixmap cache so old thumbnails aren't served from it.
+        QPixmapCache.clear()
+
+        # Rebuild the bookmark + favorites sets the delegate tracks
+        # (these come from the DB and the pack ships empty bookmarks).
+        from tomslab import favorites as favmod
+        self._delegate.set_bookmarks(bmmod.all_message_ids(self._conn))
+        self._delegate.set_favorite_names(favmod.favorite_name_set(self._conn))
+
+        self._reload_all_tabs()
+
+        self._progress_bar.setVisible(False)
+        self._refresh_status()
+        summary = f"Data pack installed."
+        if manifest:
+            summary += f" v{manifest.app_version_min}, {manifest.release_date}."
+        summary += f" Extracted {result.extracted_files:,} files."
+        if result.merged:
+            kept = result.merged.get("bookmarks", 0)
+            favs = result.merged.get("favorite_authors", 0)
+            if kept or favs:
+                summary += (
+                    f" Preserved {kept:,} bookmark(s) and {favs:,} favorite(s) "
+                    f"from your previous data."
+                )
+        self._status_label.setText(summary)
+        try:
+            from tomslab.ui.notifications import notify
+            notify("Tom's Lab — data pack installed", summary)
+        except Exception:
+            pass
+        QMessageBox.information(self, "Data pack installed", summary)
+
+    def _propagate_new_conn(self) -> None:
+        """After re-opening ``self._conn``, point every view that cached
+        its own reference at the new connection object. Views all got
+        their conn from MainWindow at construction time, so direct
+        attribute assignment is enough — none of them wrap the handle."""
+        for view in (
+            getattr(self, "_model", None),
+            getattr(self, "_gallery", None),
+            getattr(self, "_chat", None),
+            getattr(self, "_bookmarks", None),
+            getattr(self, "_docs", None),
+            getattr(self, "_tomtube", None),
+            getattr(self, "_concept_bar", None),
+        ):
+            if view is not None:
+                try:
+                    view._conn = self._conn
+                except Exception:
+                    pass
+
+    def _reload_all_tabs(self) -> None:
+        """Trigger reload on every tab / model we have. Called after a
+        data pack install so the UI reflects the new corpus."""
+        try:
+            self._model.reload()
+        except Exception:
+            pass
+        for view in (
+            getattr(self, "_gallery", None),
+            getattr(self, "_docs", None),
+            getattr(self, "_tomtube", None),
+            getattr(self, "_bookmarks", None),
+        ):
+            if view is None:
+                continue
+            try:
+                view.reload()
+            except Exception:
+                pass
+
     # ---- YouTube / TomTube ingest -------------------------------------
     def _on_check_new_youtube(self) -> None:
-        """Fast 'what's new?' check — just enumerate the channel, tell the
-        user how many new Tom videos exist, and offer to ingest only
-        those. No download / no transcribe until the user says OK."""
+        """Fast 'what's new?' check — enumerate the channel on a background
+        thread, tell the user how many new Tom videos exist, and offer to
+        ingest only those. The enumeration used to run on the UI thread
+        and froze the window ('Not Responding') while yt-dlp round-
+        tripped YouTube; the worker keeps the UI alive."""
         if self._video_worker is not None and self._video_worker.isRunning():
             QMessageBox.information(self, "Already running",
                                     "A YouTube ingest is already in progress.")
             return
-        self._status_label.setText("Checking YouTube for new Tom videos…")
-        QApplication.processEvents()
-        try:
-            from tomslab.ingest.youtube import (
-                find_new_videos, upsert_video_rows,
+        if self._youtube_check_worker is not None and \
+                self._youtube_check_worker.isRunning():
+            QMessageBox.information(
+                self, "Already checking",
+                "Still asking YouTube about new Tom videos — give it a moment."
             )
-            title_filter = dbmod.get_setting(
-                self._conn, "youtube_title_filter", "tom b"
-            ) or "tom b"
-            new, existing = find_new_videos(self._conn, title_filter=title_filter)
-        except Exception as exc:
-            QMessageBox.critical(self, "Check failed", f"{type(exc).__name__}: {exc}")
-            self._refresh_status()
             return
+
+        title_filter = dbmod.get_setting(
+            self._conn, "youtube_title_filter", "tom b"
+        ) or "tom b"
+
+        self._progress_bar.setVisible(True)
+        self._progress_bar.setRange(0, 0)
+        self._status_label.setText("Checking YouTube for new Tom videos…")
+
+        self._youtube_check_worker = YouTubeCheckWorker(
+            title_filter=title_filter, parent=self
+        )
+        self._youtube_check_worker.finished_ok.connect(
+            self._on_youtube_check_done
+        )
+        self._youtube_check_worker.failed.connect(
+            self._on_youtube_check_failed
+        )
+        self._youtube_check_worker.start()
+
+    def _on_youtube_check_failed(self, err: str) -> None:
+        self._progress_bar.setVisible(False)
+        self._youtube_check_worker = None
+        QMessageBox.critical(self, "Check failed", err)
+        self._refresh_status()
+
+    def _on_youtube_check_done(self, new, existing) -> None:
+        """Called on the UI thread once the background enumeration finishes."""
+        self._progress_bar.setVisible(False)
+        self._youtube_check_worker = None
+        self._refresh_status()
 
         if not new:
             QMessageBox.information(
@@ -1139,7 +1660,6 @@ class MainWindow(QMainWindow):
                 f"Checked the channel — {len(existing)} Tom video(s) already "
                 f"indexed, no new matches.",
             )
-            self._refresh_status()
             return
 
         titles_preview = "\n".join(
@@ -1159,15 +1679,14 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.Ok,
         )
         if reply != QMessageBox.StandardButton.Ok:
-            self._refresh_status()
             return
 
         if not self._ensure_youtube_signed_in():
-            self._refresh_status()
             return
         # Commit the new rows as 'pending' and kick off the worker — it will
         # only process pending/failed rows, so the full re-enumeration that
         # `_on_ingest_youtube` does isn't needed.
+        from tomslab.ingest.youtube import upsert_video_rows
         upsert_video_rows(self._conn, new)
         self._on_ingest_youtube_start(f"{len(new)} new video(s)")
 
@@ -1318,13 +1837,28 @@ class MainWindow(QMainWindow):
         self._stop_youtube_keepalive()
         self._tomtube.reload()
         d = report if isinstance(report, dict) else {}
+        processed = int(d.get("processed", 0))
+        failed = int(d.get("failed", 0))
+        # Desktop toast — runs whether the app is focused or not, so
+        # users can walk away from a multi-hour transcription job and
+        # get pinged when it's actually done.
+        try:
+            from tomslab.ui.notifications import notify
+            if processed > 0:
+                notify(
+                    "TomTube: transcription complete",
+                    f"{processed} new videos transcribed"
+                    + (f" · {failed} failed" if failed else ""),
+                )
+        except Exception:
+            pass
         QMessageBox.information(
             self,
             "TomTube ingest complete",
             f"Enumerated: {d.get('enumerated', 0)}\n"
             f"Newly added rows: {d.get('newly_added_rows', 0)}\n"
-            f"Processed OK: {d.get('processed', 0)}\n"
-            f"Failed: {d.get('failed', 0)}",
+            f"Processed OK: {processed}\n"
+            f"Failed: {failed}",
         )
         self._refresh_status()
 
@@ -1333,6 +1867,11 @@ class MainWindow(QMainWindow):
         self._transcription_pill.setVisible(False)
         self._video_worker = None
         self._stop_youtube_keepalive()
+        try:
+            from tomslab.ui.notifications import notify
+            notify("TomTube: transcription failed", err, urgent=True)
+        except Exception:
+            pass
         self._show_tomtube_off_ramp(err)
         self._refresh_status()
 
@@ -1614,6 +2153,94 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # about
     # ------------------------------------------------------------------
+    def _show_corpus_health(self) -> None:
+        """Open the Corpus Health dialog — audits what the AI can see.
+
+        Counts corpus rows per category (messages, docs, videos,
+        images), compares against embeddings, and fires canary
+        retrieval queries to catch silent pipeline breakage.
+        """
+        from tomslab.ui.corpus_health_dialog import CorpusHealthDialog
+        dlg = CorpusHealthDialog(parent=self)
+        dlg.exec()
+
+    # ------------------------------------------------------------------
+    # update checker
+    # ------------------------------------------------------------------
+    def _refresh_update_menu_label(self) -> None:
+        """If the last auto-check found a newer version, badge the menu
+        item so the user spots it even if they missed the toast."""
+        action = getattr(self, "_check_updates_action", None)
+        if action is None:
+            return
+        from tomslab import updates as _upd
+        pending = dbmod.get_setting(self._conn, "update_available_version", "") or ""
+        if pending and _upd._is_newer(pending, __version__):
+            action.setText(f"Check for &Updates…  (v{pending} available)")
+        else:
+            action.setText("Check for &Updates…")
+
+    def _start_prewarm(self) -> None:
+        """Kick off the background matrix-prewarm worker. Harmless if it
+        fails — the lazy-load path in semantic / visual still works."""
+        try:
+            from tomslab.ui.prewarm_worker import PrewarmWorker
+            self._prewarm_worker = PrewarmWorker(parent=self)
+            self._prewarm_worker.start()
+        except Exception:
+            pass
+
+    def _maybe_start_update_check(self) -> None:
+        """Kick off a background update check if auto-check is enabled
+        and the 24h throttle has elapsed. Silent on all failures."""
+        from tomslab import updates as _upd
+        if not _upd.should_auto_check(self._conn):
+            return
+        if self._update_thread is not None and self._update_thread.isRunning():
+            return
+        from tomslab.ui.update_dialog import UpdateCheckThread
+        thread = UpdateCheckThread(self._conn, parent=self)
+        thread.finished_with_info.connect(self._on_auto_update_result)
+        self._update_thread = thread
+        thread.start()
+
+    def _on_auto_update_result(self, info) -> None:
+        from tomslab import updates as _upd
+        from tomslab.ui import notifications
+        if info is None or not info.is_newer:
+            # Clear any stale "pending" marker if the user has since
+            # caught up to latest.
+            if info is not None and not info.is_newer:
+                _upd.mark_version_notified(self._conn, "")
+            self._refresh_update_menu_label()
+            return
+        if not _upd.already_notified_for(self._conn, info.latest_version):
+            notifications.notify(
+                "Tom's Lab update available",
+                f"v{info.latest_version} is out. "
+                "Click Help → Check for Updates.",
+            )
+            _upd.mark_version_notified(self._conn, info.latest_version)
+        self._refresh_update_menu_label()
+
+    def _show_update_dialog(self) -> None:
+        """Help → Check for Updates… — always runs a fresh check so the
+        user isn't stuck looking at a stale cached result."""
+        from tomslab import updates as _upd
+        from tomslab.ui.update_dialog import UpdateDialog
+        # Foreground fetch is fine here: user clicked explicitly, 5s is
+        # bounded, and the dialog is modal either way.
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            info = _upd.check_for_update(self._conn)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if info is not None and info.is_newer:
+            _upd.mark_version_notified(self._conn, info.latest_version)
+        self._refresh_update_menu_label()
+        dlg = UpdateDialog(self._conn, info, parent=self)
+        dlg.exec()
+
     def _show_about(self) -> None:
         QMessageBox.about(
             self,
@@ -1635,69 +2262,100 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "Getting Started & Policy",
-            "<h3>Welcome to Tom's Lab</h3>"
-            "<p>A quick read before you dig in — this sets expectations "
-            "so nobody's surprised later.</p>"
+            "<h3>Tom's Lab — Getting Started</h3>"
+            "<p>Tom's Lab is a free desktop study tool published by "
+            "<b>SDE-Software (SDES.DEV)</b> "
+            "(<a href='https://sdes.dev'>sdes.dev</a>). Continued use "
+            "indicates agreement with the terms below. The full manual "
+            "is available at <code>USER_MANUAL.md</code> in the program "
+            "folder and on GitHub.</p>"
 
-            "<h4>What this is</h4>"
-            "<p>A free, volunteer-built desktop study tool that makes "
-            "Tom B's publicly-shared teaching searchable. Built on an "
-            "as-needed basis by one person.</p>"
+            "<h4>Free tool, no warranty</h4>"
+            "<p>The software is provided free of charge, as-is, and "
+            "without warranty of any kind. There is no purchase, no "
+            "licence fee, no service contract, and no guaranteed "
+            "roadmap.</p>"
 
-            "<h4>What this isn't</h4>"
-            "<p>It is <b>not a commercial product</b>. There is no "
-            "customer support queue, no service-level agreement, no "
-            "guaranteed roadmap, and no release schedule. Bug fixes and "
-            "updates happen at the maintainer's discretion — they may "
-            "or may not ever happen. If something stops working, you "
-            "may need to wait or fix it yourself.</p>"
+            "<h4>Self-service only</h4>"
+            "<p>No one-on-one support, walkthroughs, troubleshooting "
+            "calls, email support, or individual installation "
+            "assistance is provided by the publisher. All operational "
+            "guidance is in the user manual. Questions not answered "
+            "there are out of scope.</p>"
+            "<p>Do not contact Tom B, Bookmap Ltd., the Bookmap Discord "
+            "moderators, or Discord Inc. about Tom's Lab. They are not "
+            "affiliated with this program and cannot assist.</p>"
 
-            "<h4>Your responsibilities</h4>"
+            "<h4>Before you start — prerequisites</h4>"
+            "<p>Tom's Lab needs one required component and a couple "
+            "of recommended ones. Install links are external — follow "
+            "each provider's own instructions.</p>"
             "<ul>"
-            "<li><b>Keep your own corpus current.</b> New Discord "
-            "exports, new YouTube videos, new PDFs — you import them "
-            "yourself when you want them indexed. The app does not "
-            "auto-fetch anything. The ingest workflows are documented "
-            "in Help and in the Getting Started guide.</li>"
-            "<li><b>Respect third-party Terms of Service.</b> "
-            "Bulk-exporting Discord messages and bulk-downloading "
-            "YouTube videos may violate those platforms' ToS. This app "
-            "provides the ingest mechanisms; <b>whether, how, and "
-            "how much you use them is your responsibility</b>, not "
-            "the maintainer's.</li>"
-            "<li><b>Verify every answer.</b> AI-generated output can "
-            "be wrong. This is an experimental research tool, not "
-            "financial advice. You alone are responsible for your "
-            "trading decisions.</li>"
+            "<li><b>Ollama — required.</b> Used to embed each Ask Tom "
+            "question into the same vector space as the shipped "
+            "corpus. Without it, Ask Tom cannot answer. Download from "
+            "<a href='https://ollama.com/download/windows'>"
+            "ollama.com/download/windows</a>, then from a terminal: "
+            "<code>ollama pull nomic-embed-text</code> and "
+            "<code>ollama pull llama3.1:8b</code>.</li>"
+            "<li><b>Gemini API key — recommended.</b> Upgrades Ask "
+            "Tom's answer quality above the local Ollama fallback. "
+            "Free tier is enough for personal use. Get a key at "
+            "<a href='https://aistudio.google.com/apikey'>"
+            "aistudio.google.com/apikey</a>, then paste it into "
+            "<b>File → Settings</b>.</li>"
+            "<li><b>NVIDIA GPU driver — optional.</b> Speeds up CLIP "
+            "image search and Whisper transcription. Without a GPU the "
+            "app still works, just slower. Latest drivers at "
+            "<a href='https://www.nvidia.com/download/index.aspx'>"
+            "nvidia.com/download</a>.</li>"
+            "</ul>"
+            "<p>Full step-by-step setup, including the Google Drive "
+            "data pack download, is covered in §3 of the user manual "
+            "(<code>USER_MANUAL.md</code>).</p>"
+
+            "<h4>User responsibility</h4>"
+            "<ul>"
+            "<li>Installing the components above and keeping them "
+            "current is the user's responsibility.</li>"
+            "<li>Obtaining and importing corpus material — Discord "
+            "exports, YouTube videos, reference PDFs — is the user's "
+            "responsibility, as is respecting the Terms of Service of "
+            "the source platforms.</li>"
+            "<li>AI-generated output can be incorrect. Every answer "
+            "must be verified against the original source. Tom's Lab is "
+            "an experimental research tool, not financial advice. All "
+            "trading decisions, and any resulting gains or losses, are "
+            "the user's alone.</li>"
             "</ul>"
 
-            "<h4>Why this policy</h4>"
-            "<p>This is a free utility shared so that people interested "
-            "in Tom's framework have a useful tool. The choice is "
-            "between sharing it under these constraints or not sharing "
-            "it at all. The maintainer is happy to share under the "
-            "constraints above.</p>"
+            "<h4>Updates</h4>"
+            "<p>Bug fixes and feature updates may be released on an "
+            "occasional, discretionary basis. No schedule is guaranteed "
+            "and no commitment to fix, respond to, or acknowledge "
+            "individual reports is made.</p>"
 
-            "<h4>About the publisher</h4>"
-            "<p>Tom's Lab is developed by "
-            "<b>SDE-Software (SDES.DEV)</b> — "
-            "<a href='https://sdes.dev'>sdes.dev</a>. "
-            "It is a free side project, separate from SDE-Software's "
-            "commercial products. No support, walkthroughs, troubleshooting, "
-            "or individual assistance is provided by SDE-Software, Bookmap, "
-            "Tom B, or the Bookmap Discord channels for this program. "
-            "Bugs and glitches will be addressed as they are identified; "
-            "no service-level agreement is offered.</p>"
+            "<h4>Structure</h4>"
+            "<p>Tom's Lab follows the same support, warranty, and "
+            "liability model as SDE-Software's <b>BMBridge Lite</b>: "
+            "published for public benefit, used entirely at the user's "
+            "own risk, with no paid support tier.</p>"
 
-            "<p><i>Thanks for reading — enjoy the app.</i></p>"
+            "<p>The full legal terms are available under "
+            "<b>Help → Disclaimer &amp; Legal</b>.</p>"
         )
 
     def _show_disclaimer(self) -> None:
-        QMessageBox.information(
-            self,
-            "Disclaimer & Legal",
-            self._disclaimer_html(),
+        """Show the full disclaimer in the same fixed-size scrollable
+        dialog used by the first-run gate — but in review-only mode
+        (single 'Close' button, no scroll-to-enable gating). QMessageBox
+        stretched the text off-screen on big disclaimers; the dedicated
+        dialog handles scrolling cleanly."""
+        from tomslab.ui.disclaimer_dialog import DisclaimerGateDialog
+        dlg = DisclaimerGateDialog(
+            self._disclaimer_html(), parent=self, review_only=True,
         )
+        dlg.exec()
 
     def _disclaimer_html(self) -> str:
         """Single source of truth for the Disclaimer & Legal text — used
@@ -1939,7 +2597,7 @@ class MainWindow(QMainWindow):
         # fall back to terminate() if it refuses to exit in time.
         self._stop_youtube_keepalive()
         for worker in (self._worker, self._embed_worker, self._image_embed_worker,
-                       self._video_worker):
+                       self._video_worker, self._youtube_check_worker):
             if worker is not None and worker.isRunning():
                 worker.quit()
                 worker.wait(1500)

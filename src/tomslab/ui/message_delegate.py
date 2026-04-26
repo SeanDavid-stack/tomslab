@@ -582,11 +582,55 @@ def _thumb_paths(msg: MessageRow) -> list[str]:
 
 
 def _load_thumb(path: str) -> QPixmap | None:
-    key = f"tomslab_thumb:{path}"
+    """Cache a SCALED-AT-DECODE pixmap keyed by path.
+
+    This is the main hot path during Feed scroll. Every paint() pass
+    calls this for every attached image in every visible row. The old
+    implementation cached the full-resolution pixmap and re-scaled on
+    every paint — a 3840×2160 chart being rescaled 60× per second
+    caused the "Not Responding" stutter during fast scroll.
+
+    Now we decode DIRECTLY at thumbnail size using QImageReader, which
+    is an order of magnitude cheaper than loading the full pixmap and
+    then Pixmap.scaled()'ing it. The scaled result is what gets cached.
+    """
+    key = f"tomslab_thumb_scaled:{path}"
     pix = QPixmapCache.find(key)
     if pix is not None:
         return pix
-    pix = QPixmap(path)
+    try:
+        from PyQt6.QtCore import QSize
+        from PyQt6.QtGui import QImageReader
+        reader = QImageReader(path)
+        reader.setAutoTransform(True)
+        native = reader.size()
+        if native.isValid() and (
+            native.width() > THUMB_MAX_W or native.height() > THUMB_MAX_H
+        ):
+            # Preserve aspect ratio ourselves so the decoder scales once
+            # at source resolution instead of twice (decode → Pixmap.scaled).
+            w_ratio = THUMB_MAX_W / max(1, native.width())
+            h_ratio = THUMB_MAX_H / max(1, native.height())
+            ratio = min(w_ratio, h_ratio, 1.0)
+            target = QSize(
+                max(1, int(native.width() * ratio)),
+                max(1, int(native.height() * ratio)),
+            )
+            reader.setScaledSize(target)
+        img = reader.read()
+        if img.isNull():
+            return None
+        pix = QPixmap.fromImage(img)
+    except Exception:
+        pix = QPixmap(path)
+        if pix.isNull():
+            return None
+        if pix.width() > THUMB_MAX_W or pix.height() > THUMB_MAX_H:
+            pix = pix.scaled(
+                THUMB_MAX_W, THUMB_MAX_H,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
     if pix.isNull():
         return None
     QPixmapCache.insert(key, pix)
@@ -594,13 +638,15 @@ def _load_thumb(path: str) -> QPixmap | None:
 
 
 def _scale_for_thumb(pix: QPixmap, max_width_total: int) -> QPixmap:
+    # After _load_thumb changed to decode-at-size, the pixmap is already
+    # within THUMB_MAX_W × THUMB_MAX_H. We only need to clamp width if
+    # the row we're painting into is narrower than THUMB_MAX_W.
     max_w = min(THUMB_MAX_W, max_width_total)
-    max_h = THUMB_MAX_H
-    if pix.width() <= max_w and pix.height() <= max_h:
+    if pix.width() <= max_w:
         return pix
     return pix.scaled(
         max_w,
-        max_h,
+        THUMB_MAX_H,
         Qt.AspectRatioMode.KeepAspectRatio,
         Qt.TransformationMode.SmoothTransformation,
     )

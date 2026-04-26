@@ -712,8 +712,8 @@ def ingest_single_video(
     n = store_chunks(conn, video_id, chunks)
     conn.execute(
         "UPDATE videos SET transcript_status = 'transcribed', "
-        "transcript_error = NULL WHERE id = ?",
-        (video_id,),
+        "transcript_error = NULL, n_chunks = ? WHERE id = ?",
+        (n, video_id),
     )
     conn.commit()
 
@@ -798,13 +798,30 @@ def ingest_channel(
 # yt-dlp default:          "Title-VIDEO_ID.ext" or "Title [VIDEO_ID].ext"
 # Trailing-ID form is common because the extension is stripped before we
 # hit the regex (we match against the stem), so the id often lands at EOL.
+# Canonical bracketed form — what every real downloader produces. We
+# try this FIRST so an 11-letter English word elsewhere in the title
+# (e.g. "Participant") can't get misidentified as the video id.
+_YT_ID_BRACKETED = re.compile(r"\[([A-Za-z0-9_-]{11})\]")
+# Loose fallback for filenames that somehow lost their brackets.
 _YT_ID_IN_FILENAME = re.compile(
     r"(?:\[|[\s\-_])([A-Za-z0-9_-]{11})(?:\]|[\s\.]|$)"
 )
 
 
 def _parse_video_id(stem: str) -> str | None:
-    """Find a likely YouTube id embedded in a filename stem, or None."""
+    """Find a likely YouTube id embedded in a filename stem, or None.
+
+    Prefers the canonical ``[VIDEO_ID]`` bracketed form that every real
+    YouTube downloader produces (yt-dlp, 4K Video Downloader,
+    JDownloader, browser extensions). Without this preference, an
+    11-letter English word in the title (e.g. "Participant",
+    "Comparison", "Psychology") will match the loose regex first and
+    get stored as the id, breaking every citation that tries to
+    reconstruct the YouTube URL from it.
+    """
+    m = _YT_ID_BRACKETED.search(stem)
+    if m:
+        return m.group(1)
     m = _YT_ID_IN_FILENAME.search(stem)
     return m.group(1) if m else None
 
@@ -957,6 +974,47 @@ def ingest_folder(
         )
     total = len(pending)
 
+    # Eagerly warm up Whisper before entering the per-file loop. If
+    # torch/faster-whisper is wedged on this machine, _ensure_whisper's
+    # 45s timeout fires here — with a visible log line — instead of
+    # silently hanging inside the first per-file transcribe() call.
+    # If the warmup fails, bail out of the whole ingest: otherwise
+    # we'd march through every pending row and mark each 'failed' in
+    # the DB, leaving a mess the user would have to manually reset
+    # after a reboot fixed the underlying wedge.
+    if total > 0:
+        log.info(
+            "folder-ingest: loading whisper model '%s' "
+            "(first load can take up to a minute)…", model_name,
+        )
+        if progress:
+            progress(f"Loading whisper model {model_name}…", 0, total)
+        try:
+            _load_whisper(model_name)
+            log.info("folder-ingest: whisper ready — starting transcription")
+        except Exception as exc:
+            log.error(
+                "folder-ingest: whisper could not be loaded — %s. "
+                "Aborting this ingest run WITHOUT marking files failed, "
+                "so they'll be retried automatically next time. This "
+                "almost always needs a reboot to clear a stuck GPU/DLL "
+                "state.", exc,
+            )
+            if progress:
+                progress(
+                    "Whisper failed to load — reboot needed. "
+                    "No files marked failed; will retry after reboot.",
+                    0, total,
+                )
+            return {
+                "scanned": len(candidates),
+                "newly_added_rows": added,
+                "processed": 0,
+                "failed": 0,
+                "embedded": 0,
+                "errors": [("_whisper_load", str(exc)[:300])],
+            }
+
     done = 0
     errors: list[tuple[str, str]] = []
     for i, r in enumerate(pending, start=1):
@@ -991,11 +1049,11 @@ def ingest_folder(
             segs = transcribe(audio, model_name=model_name,
                               on_segment=_on_segment)
             chunks = chunk_segments(segs)
-            store_chunks(conn, vid, chunks)
+            n_stored = store_chunks(conn, vid, chunks)
             conn.execute(
                 "UPDATE videos SET transcript_status = 'transcribed', "
-                "transcript_error = NULL WHERE id = ?",
-                (vid,),
+                "transcript_error = NULL, n_chunks = ? WHERE id = ?",
+                (n_stored, vid),
             )
             conn.commit()
             done += 1

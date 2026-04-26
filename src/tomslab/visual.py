@@ -196,6 +196,62 @@ def embed_text(bundle: CLIPBundle, text: str) -> np.ndarray:
     return feats[0].detach().cpu().numpy().astype("float32")
 
 
+def classify_image(
+    bundle: CLIPBundle,
+    image_path: str,
+    prompt_groups: dict[str, list[str]],
+    *,
+    temperature: float = 100.0,
+) -> dict[str, float]:
+    """Zero-shot classify an image against named groups of text prompts.
+
+    Each group is averaged into a single prototype vector, then CLIP's
+    image embedding is softmaxed (scaled by ``temperature``, the standard
+    CLIP logit scale) against the group prototypes.
+
+    Returns a dict mapping group name → probability (0..1, sums to 1).
+    Returns ``{}`` if the image can't be read or vision isn't available.
+    """
+    if not prompt_groups:
+        return {}
+    img = _load_image(image_path)
+    if img is None:
+        return {}
+    # embed image
+    try:
+        tensor = bundle.preprocess(img).unsqueeze(0).to(bundle.device)
+    except Exception as exc:
+        log.debug("classify preprocess failed for %s: %s", image_path, exc)
+        return {}
+    with torch.no_grad():
+        img_feat = bundle.model.encode_image(tensor)
+        img_feat = img_feat / img_feat.norm(dim=-1, keepdim=True)
+
+    # embed + average prompts per group
+    group_names = list(prompt_groups.keys())
+    protos: list[np.ndarray] = []
+    for name in group_names:
+        prompts = prompt_groups[name] or []
+        if not prompts:
+            protos.append(np.zeros(bundle.dim, dtype=np.float32))
+            continue
+        tokens = bundle.tokenizer(prompts).to(bundle.device)
+        with torch.no_grad():
+            feats = bundle.model.encode_text(tokens)
+            feats = feats / feats.norm(dim=-1, keepdim=True)
+        avg = feats.mean(dim=0)
+        avg = avg / avg.norm()
+        protos.append(avg.detach().cpu().numpy().astype("float32"))
+
+    img_vec = img_feat[0].detach().cpu().numpy().astype("float32")
+    logits = np.array([float(np.dot(img_vec, p)) for p in protos]) * temperature
+    # softmax
+    logits -= logits.max()
+    exp = np.exp(logits)
+    probs = exp / exp.sum()
+    return {name: float(probs[i]) for i, name in enumerate(group_names)}
+
+
 # ---------------------------------------------------------------------------
 # Visual search — cosine over cached image embedding matrix
 # ---------------------------------------------------------------------------
@@ -248,6 +304,25 @@ def invalidate_cache() -> None:
         _cache.doc_page_ids = None
         _cache.doc_titles = None
         _cache.doc_page_nums = None
+
+
+def invalidate_all_caches() -> None:
+    """Invalidate every visual cache. Thin wrapper so callers (e.g. the
+    Install-data-pack flow) don't need to track which submodule owns what."""
+    invalidate_cache()
+
+
+def prewarm_all_caches(conn: sqlite3.Connection) -> None:
+    """Force the CLIP matrix into memory now so the first Gallery visual
+    search (or first visual-mode chat citation) is instant. Runs on a
+    background thread at app startup; errors are non-fatal because the
+    lazy load path still works as a fallback.
+    """
+    try:
+        with _cache.lock:
+            _load_matrix(conn)
+    except Exception:
+        pass
 
 
 def _current_signature(conn: sqlite3.Connection) -> tuple:
@@ -494,6 +569,8 @@ def pending_count(conn: sqlite3.Connection, model_tag: str) -> int:
           FROM attachments a
          WHERE a.local_path IS NOT NULL AND a.local_path != ''
            AND {_EXT_WHERE}
+           AND (a.chart_decision IS NULL
+                OR a.chart_decision IN ('keep','auto_keep'))
            AND NOT EXISTS (
                 SELECT 1 FROM image_embeddings ie
                  WHERE ie.attachment_id = a.id AND ie.model = ?
@@ -521,12 +598,23 @@ def pending_doc_page_count(conn: sqlite3.Connection, model_tag: str) -> int:
 
 
 def pending_items_sql() -> str:
-    """Return the SELECT body that the pipeline uses — shared so filters stay in sync."""
+    """Return the SELECT body that the pipeline uses — shared so filters stay in sync.
+
+    Excludes attachments the chart classifier flagged as junk
+    (``chart_decision IN ('discard','auto_discard')``). If the user
+    purges those files, the rows still exist in the DB with a stale
+    ``local_path`` pointing at ``_discarded/`` — we don't want CLIP
+    to re-embed them and pollute the Gallery visual search index.
+    Rows with ``chart_decision IS NULL`` (unreviewed) are still
+    included so a partial classifier run doesn't stall embedding.
+    """
     return f"""
         SELECT a.id AS id, a.local_path AS path
           FROM attachments a
          WHERE a.local_path IS NOT NULL AND a.local_path != ''
            AND {_EXT_WHERE}
+           AND (a.chart_decision IS NULL
+                OR a.chart_decision IN ('keep','auto_keep'))
            AND NOT EXISTS (
                 SELECT 1 FROM image_embeddings ie
                  WHERE ie.attachment_id = a.id AND ie.model = ?
