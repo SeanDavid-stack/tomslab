@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import logging
 import shutil
 import sqlite3
 import tarfile
@@ -38,6 +39,8 @@ import zstandard as zstd
 
 from tomslab import __version__ as APP_VERSION
 from tomslab.paths import app_root, data_dir
+
+log = logging.getLogger(__name__)
 
 
 SENTINEL = "{DATA}"
@@ -266,44 +269,105 @@ def _merge_personal_data(backup_db: Path, new_db: Path) -> dict[str, int]:
     Returns a ``{'favorite_authors': n, 'bookmarks': n}`` count map.
     Missing source tables (schema mismatch, fresh install with no prior
     data) fall through silently and contribute zero.
+
+    Implementation note: the previous version used ``ATTACH DATABASE``
+    against the new DB. That triggered a hard process crash on Windows
+    in some configurations (no Python traceback, app vanished). The
+    new flow opens the two DBs as two separate connections — read all
+    rows out of the backup, close it, then write them into the new DB.
+    Slower but completely robust.
     """
     counts = {"bookmarks": 0, "favorite_authors": 0}
     if not backup_db.exists():
+        log.info("merge: backup DB %s does not exist — skipping", backup_db)
         return counts
 
-    # ATTACH can't be parameterized in sqlite3 — escape single quotes in
-    # the path for safety even though it's a local path we construct.
-    attach_path = backup_db.as_posix().replace("'", "''")
-    conn = sqlite3.connect(str(new_db))
+    # ---- read favorites + bookmarks out of the backup ----------------
+    fav_rows: list[tuple] = []
+    bm_rows: list[tuple] = []
     try:
-        conn.execute(f"ATTACH DATABASE '{attach_path}' AS old")
+        log.info("merge: opening backup DB %s read-only", backup_db)
+        src = sqlite3.connect(f"file:{backup_db.as_posix()}?mode=ro", uri=True)
         try:
-            n = conn.execute(
-                "INSERT OR IGNORE INTO favorite_authors "
-                "  (author_name, author_nickname, added_at) "
-                "SELECT author_name, author_nickname, added_at "
-                "  FROM old.favorite_authors"
-            ).rowcount
-            counts["favorite_authors"] = max(int(n or 0), 0)
-        except sqlite3.OperationalError:
-            # Pre-favorites schema in the backup — nothing to merge.
-            pass
+            try:
+                fav_rows = src.execute(
+                    "SELECT author_name, author_nickname, added_at "
+                    "  FROM favorite_authors"
+                ).fetchall()
+            except sqlite3.OperationalError:
+                # Pre-favorites schema in the backup — table missing.
+                fav_rows = []
+            try:
+                bm_rows = src.execute(
+                    "SELECT message_id, note, tags, created_at "
+                    "  FROM bookmarks"
+                ).fetchall()
+            except sqlite3.OperationalError:
+                bm_rows = []
+        finally:
+            src.close()
+    except Exception as exc:
+        log.warning("merge: could not read backup DB (%s) — skipping merge",
+                    type(exc).__name__)
+        return counts
 
+    log.info("merge: read %d favorites + %d bookmarks from backup",
+             len(fav_rows), len(bm_rows))
+
+    if not fav_rows and not bm_rows:
+        # Empty source — nothing to merge. Skip the second connection
+        # entirely to keep the path as short as possible.
+        return counts
+
+    # ---- write into the new DB ---------------------------------------
+    try:
+        dst = sqlite3.connect(str(new_db))
         try:
-            n = conn.execute(
-                "INSERT INTO bookmarks (message_id, note, tags, created_at) "
-                "SELECT b.message_id, b.note, b.tags, b.created_at "
-                "  FROM old.bookmarks b "
-                " WHERE EXISTS (SELECT 1 FROM messages m WHERE m.id = b.message_id)"
-            ).rowcount
-            counts["bookmarks"] = max(int(n or 0), 0)
-        except sqlite3.OperationalError:
-            pass
+            if fav_rows:
+                try:
+                    dst.executemany(
+                        "INSERT OR IGNORE INTO favorite_authors "
+                        "  (author_name, author_nickname, added_at) "
+                        "VALUES (?, ?, ?)",
+                        fav_rows,
+                    )
+                    counts["favorite_authors"] = len(fav_rows)
+                except sqlite3.OperationalError as exc:
+                    log.warning("merge: favorite_authors insert failed: %s", exc)
 
-        conn.commit()
-        conn.execute("DETACH DATABASE old")
-    finally:
-        conn.close()
+            if bm_rows:
+                # Filter to bookmarks whose message_id still exists in
+                # the new corpus, so we never leave dangling refs.
+                kept: list[tuple] = []
+                for mid, note, tags, created_at in bm_rows:
+                    row = dst.execute(
+                        "SELECT 1 FROM messages WHERE id = ? LIMIT 1",
+                        (mid,),
+                    ).fetchone()
+                    if row is not None:
+                        kept.append((mid, note, tags, created_at))
+                if kept:
+                    try:
+                        dst.executemany(
+                            "INSERT INTO bookmarks "
+                            "  (message_id, note, tags, created_at) "
+                            "VALUES (?, ?, ?, ?)",
+                            kept,
+                        )
+                        counts["bookmarks"] = len(kept)
+                    except sqlite3.OperationalError as exc:
+                        log.warning("merge: bookmarks insert failed: %s", exc)
+
+            dst.commit()
+        finally:
+            dst.close()
+    except Exception as exc:
+        log.warning("merge: could not write to new DB (%s)",
+                    type(exc).__name__)
+        # counts stays at whatever we'd populated; install still succeeds.
+
+    log.info("merge: preserved %d favorites + %d bookmarks",
+             counts["favorite_authors"], counts["bookmarks"])
     return counts
 
 
@@ -381,9 +445,11 @@ def install_pack(
     current_data.mkdir(parents=True, exist_ok=True)
 
     try:
+        log.info("install_pack: starting extract from %s", pack_path)
         if progress is not None:
             progress(0, 0, "Extracting data pack…")
         n = _extract_pack(pack_path, current_data, progress=progress)
+        log.info("install_pack: extracted %d files into %s", n, current_data)
 
         db_path = current_data / "tomslab.db"
         if not db_path.exists():
@@ -391,24 +457,30 @@ def install_pack(
                 "Pack does not contain data/tomslab.db — wrong archive?"
             )
 
+        log.info("install_pack: rewriting path sentinels in %s", db_path)
         if progress is not None:
             progress(0, 0, "Rewriting paths…")
         _rewrite_sentinel(db_path, current_data)
+        log.info("install_pack: sentinel rewrite done")
 
         # Preserve the user's bookmarks + favorites across pack updates.
         # On a truly fresh install backup_dir is None and this is a no-op.
         merged: dict[str, int] | None = None
         if backup_dir is not None:
+            log.info("install_pack: starting merge from %s", backup_dir)
             if progress is not None:
                 progress(0, 0, "Preserving bookmarks + favorites…")
             try:
                 merged = _merge_personal_data(backup_dir / "tomslab.db", db_path)
+                log.info("install_pack: merge done %s", merged)
             except Exception:
                 # Preservation is best-effort. A merge failure must not
                 # sink the whole install — the freshly-extracted corpus
                 # is still valid without the user's private rows.
+                log.exception("install_pack: merge raised; continuing without it")
                 merged = None
 
+        log.info("install_pack: success (n=%d, merged=%s)", n, merged)
         return InstallResult(
             backup_dir=backup_dir,
             extracted_files=n,
