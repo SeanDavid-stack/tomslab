@@ -67,6 +67,18 @@ for pkg in COLLECT_ALL_PACKAGES:
 
 
 # ---------------------------------------------------------------------------
+# Local runtime assets — splash image is loaded at startup by main.py from
+# ``packaging/splash.png``. Without bundling it the frozen build silently
+# falls back to the drawn placeholder, which is wrong for shipped releases.
+# ---------------------------------------------------------------------------
+SPLASH = REPO_ROOT / "packaging" / "splash.png"
+if SPLASH.exists():
+    datas.append((str(SPLASH), "packaging"))
+else:
+    print(f"[tomslab.spec] WARNING splash.png not found at {SPLASH}")
+
+
+# ---------------------------------------------------------------------------
 # Hidden imports PyInstaller won't find on its own
 # ---------------------------------------------------------------------------
 # PyQt6 plugins + QtNetwork/QtSvg are pulled in indirectly by stylesheets
