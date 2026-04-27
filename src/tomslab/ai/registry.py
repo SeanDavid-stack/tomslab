@@ -13,6 +13,7 @@ from tomslab import db as dbmod
 from tomslab import secret_store
 from tomslab.ai.base import AIProvider, ProviderUnavailable
 from tomslab.ai.gemini import GeminiProvider
+from tomslab.ai.groq import GroqProvider
 from tomslab.ai.ollama_provider import OllamaProvider
 
 log = logging.getLogger(__name__)
@@ -56,9 +57,23 @@ def _build_gemini(conn: sqlite3.Connection, role: str) -> AIProvider:
     return GeminiProvider(api_key=api_key, chat_model=model)
 
 
+def _build_groq(conn: sqlite3.Connection, role: str) -> AIProvider:
+    if role != "chat":
+        raise ProviderUnavailable(
+            "Groq only supports chat — pick Ollama or Gemini for embed/vision."
+        )
+    api_key = secret_store.load_api_key(conn, "groq")
+    if not api_key:
+        raise ProviderUnavailable("no Groq API key configured (Settings → AI Providers)")
+    from tomslab.ai.groq import DEFAULT_CHAT_MODEL as _GROQ_DEFAULT
+    model = dbmod.get_setting(conn, "chat_model_groq", _GROQ_DEFAULT) or _GROQ_DEFAULT
+    return GroqProvider(api_key=api_key, chat_model=model)
+
+
 _BUILDERS: dict[str, Callable[[sqlite3.Connection, str], AIProvider]] = {
     "ollama": _build_ollama,
     "gemini": _build_gemini,
+    "groq": _build_groq,
 }
 
 

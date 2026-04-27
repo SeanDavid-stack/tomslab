@@ -236,7 +236,30 @@ Ollama; only the final answer generation goes to Gemini.
 Keys are stored encrypted in the local database and never transmitted
 anywhere except to Google's own API endpoint.
 
-### 3.5 NVIDIA GPU driver (optional)
+### 3.5 Configure a Groq API key (optional alternative to Gemini)
+
+Groq is a separate cloud chat provider you can use instead of Gemini.
+It is **chat-only** — embedding and vision still need Ollama or Gemini.
+
+| Trade-off | Gemini 2.5 Flash | Groq (Llama 3.3 70B) |
+|---|---|---|
+| Free-tier daily limit | ~1,500 requests | ~14,400 requests |
+| Token streaming speed | Fast | Much faster (LPU hardware) |
+| Citation discipline (Ask Tom links) | Better | Less reliable — verify links |
+| Context window | 1M tokens | 128K tokens |
+
+Use Gemini by default. Switch to Groq if you regularly hit Gemini's
+daily cap or want faster streaming, and accept that you should
+double-check Ask Tom citations more carefully.
+
+1. Create a free key at
+   [console.groq.com/keys](https://console.groq.com/keys).
+2. In Tom's Lab: **File → Settings… → AI Providers**, paste the key
+   into the **Groq** group, and change **Chat (Ask Tom)** at the top
+   of the tab from `gemini` to `groq`.
+3. Click **Test chat** to verify.
+
+### 3.6 NVIDIA GPU driver (optional)
 
 CLIP image search and Whisper video transcription both run dramatically
 faster on an NVIDIA GPU with CUDA. If you have one, keep its driver

@@ -1,9 +1,10 @@
 """In-app update checker.
 
-Fetches a tiny JSON manifest from GitHub and compares it against the
-bundled ``__version__``. No auto-download, no auto-install — the goal is
-just to let the user know when Tom has published a newer build, so they
-can grab the installer manually.
+Queries the GitHub Releases API and compares the latest release's tag
+against the bundled ``__version__``. No auto-download, no auto-install
+— the goal is just to let the user know when SDE-Software has
+published a newer build, so they can grab the installer manually from
+the Drive folder.
 
 Design constraints:
   * Stdlib only. The app already carries enough wheels; one more network
@@ -13,6 +14,9 @@ Design constraints:
     must never get in the user's way.
   * Policy-compliant: free-utility, no-support. We surface "an update
     exists" but never claim it's required, safe, or supported.
+  * Self-maintaining trigger. Cutting a new ``vX.Y.Z`` git tag on the
+    GitHub repo is the only release action needed for users to be
+    notified — no ``latest.json`` to keep in sync.
 """
 from __future__ import annotations
 
@@ -28,11 +32,18 @@ from tomslab import __version__
 from tomslab import db as dbmod
 
 DEFAULT_MANIFEST_URL = (
-    "https://raw.githubusercontent.com/SDES-Software/tomslab/main/latest.json"
+    "https://api.github.com/repos/SeanDavid-stack/tomslab/releases/latest"
 )
+# v1.0.0 shipped with a default URL pointing at a JSON manifest that was
+# never published. Existing installs have it stuck in their settings
+# table and will silently fail every check until migrated. Any saved URL
+# matching this list gets rewritten to ``DEFAULT_MANIFEST_URL`` on read.
+_LEGACY_MANIFEST_URLS = frozenset({
+    "https://raw.githubusercontent.com/SDES-Software/tomslab/main/latest.json",
+})
 _TIMEOUT_SECONDS = 5
 _CHECK_INTERVAL_SECONDS = 24 * 60 * 60  # once per day
-_USER_AGENT = f"TomsLab/{__version__} (+https://github.com/SDES-Software/tomslab)"
+_USER_AGENT = f"TomsLab/{__version__} (+https://github.com/SeanDavid-stack/tomslab)"
 
 
 @dataclass(frozen=True)
@@ -90,6 +101,26 @@ def _fetch_manifest(url: str) -> Optional[dict]:
 
 
 def _coerce(data: dict) -> Optional[UpdateInfo]:
+    """Adapt either a GitHub Releases API payload or a legacy custom
+    manifest into ``UpdateInfo``. The legacy fallback keeps existing
+    user installs that point at a private ``latest.json`` working."""
+    # GitHub Releases shape: {"tag_name": "v1.0.1", "html_url": "...",
+    #                         "body": "...", "published_at": "..."}
+    tag = str(data.get("tag_name") or "").strip()
+    if tag:
+        latest = tag.lstrip("vV")
+        if not latest:
+            return None
+        return UpdateInfo(
+            current_version=__version__,
+            latest_version=latest,
+            url=str(data.get("html_url") or "").strip(),
+            notes=str(data.get("body") or "").strip(),
+            released=str(data.get("published_at") or "").strip(),
+            is_newer=_is_newer(latest, __version__),
+        )
+    # Legacy custom manifest shape: {"version": "1.0.1", "url": "...",
+    #                                "notes": "...", "released": "..."}
     latest = str(data.get("version", "")).strip()
     if not latest:
         return None
@@ -108,8 +139,7 @@ def _coerce(data: dict) -> Optional[UpdateInfo]:
 # ----------------------------------------------------------------------
 def check_for_update(conn: sqlite3.Connection) -> Optional[UpdateInfo]:
     """Synchronous fetch + parse. Never raises on network failure."""
-    url = dbmod.get_setting(conn, "update_check_url", DEFAULT_MANIFEST_URL) \
-        or DEFAULT_MANIFEST_URL
+    url = get_manifest_url(conn)
     data = _fetch_manifest(url)
     if data is None:
         return None
@@ -161,8 +191,12 @@ def get_auto_check_enabled(conn: sqlite3.Connection) -> bool:
 
 
 def get_manifest_url(conn: sqlite3.Connection) -> str:
-    return dbmod.get_setting(conn, "update_check_url", DEFAULT_MANIFEST_URL) \
+    saved = dbmod.get_setting(conn, "update_check_url", DEFAULT_MANIFEST_URL) \
         or DEFAULT_MANIFEST_URL
+    if saved.strip() in _LEGACY_MANIFEST_URLS:
+        dbmod.set_setting(conn, "update_check_url", DEFAULT_MANIFEST_URL)
+        return DEFAULT_MANIFEST_URL
+    return saved
 
 
 def set_manifest_url(conn: sqlite3.Connection, url: str) -> None:

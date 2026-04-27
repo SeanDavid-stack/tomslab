@@ -135,6 +135,44 @@ class SettingsDialog(QDialog):
         o.addRow("", self._wrap(oll_buttons))
         outer.addWidget(oll)
 
+        # --- Groq -------------------------------------------------------
+        # Chat-only. Free tier is generous (~14,400 req/day) and inference
+        # is much faster than Gemini Flash, but the open models Groq hosts
+        # follow citation instructions less reliably than Gemini 2.5 Flash.
+        # Position as alternative for power users, not as the default.
+        groq = QGroupBox("Groq (cloud, chat-only — fast, generous free tier)")
+        gq = QFormLayout(groq)
+
+        self._groq_key = QLineEdit(secret_store.load_api_key(self._conn, "groq"))
+        self._groq_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self._groq_key.setPlaceholderText("Paste key from https://console.groq.com/keys")
+        gq.addRow("API key:", self._groq_key)
+
+        from tomslab.ai.groq import DEFAULT_CHAT_MODEL as _GROQ_DEFAULT
+        self._groq_chat_model = QLineEdit(
+            dbmod.get_setting(self._conn, "chat_model_groq", _GROQ_DEFAULT) or ""
+        )
+        self._groq_chat_model.setPlaceholderText(_GROQ_DEFAULT)
+        gq.addRow("Chat model:", self._groq_chat_model)
+
+        groq_buttons = QHBoxLayout()
+        test_groq_chat = QPushButton("Test chat")
+        test_groq_chat.clicked.connect(lambda: self._test_provider("groq", "chat"))
+        groq_buttons.addWidget(test_groq_chat)
+        groq_buttons.addStretch(1)
+        gq.addRow("", self._wrap(groq_buttons))
+
+        groq_hint = QLabel(
+            "Groq does not offer embeddings or vision — use it for the "
+            "Chat role only. Open-model citations are less reliable than "
+            "Gemini's, so verify Ask Tom's links if you switch."
+        )
+        groq_hint.setWordWrap(True)
+        groq_hint.setStyleSheet("color: #949BA4; font-size: 11px;")
+        gq.addRow("", groq_hint)
+
+        outer.addWidget(groq)
+
         outer.addStretch(1)
         return w
 
@@ -265,7 +303,7 @@ class SettingsDialog(QDialog):
     # ------------------------------------------------------------------
     def _make_provider_combo(self, current: str) -> QComboBox:
         c = QComboBox()
-        for name in ("ollama", "gemini"):
+        for name in ("ollama", "gemini", "groq"):
             c.addItem(name, userData=name)
         idx = c.findData(current)
         if idx >= 0:
@@ -291,8 +329,10 @@ class SettingsDialog(QDialog):
         dbmod.set_setting(self._conn, "vision_model_ollama", self._oll_vision_model.text().strip())
         dbmod.set_setting(self._conn, "embed_model_gemini", self._gem_embed_model.text().strip())
         dbmod.set_setting(self._conn, "chat_model_gemini", self._gem_chat_model.text().strip())
-        # api key
+        dbmod.set_setting(self._conn, "chat_model_groq", self._groq_chat_model.text().strip())
+        # api keys
         secret_store.store_api_key(self._conn, "gemini", self._gem_key.text().strip())
+        secret_store.store_api_key(self._conn, "groq", self._groq_key.text().strip())
         # whisper model
         dbmod.set_setting(
             self._conn, "whisper_model", self._whisper_combo.currentData()
@@ -313,6 +353,9 @@ class SettingsDialog(QDialog):
             dbmod.set_setting(self._conn, "embed_model_ollama", self._oll_embed_model.text().strip())
             dbmod.set_setting(self._conn, "chat_model_ollama", self._oll_chat_model.text().strip())
             dbmod.set_setting(self._conn, "vision_model_ollama", self._oll_vision_model.text().strip())
+        elif name == "groq":
+            secret_store.store_api_key(self._conn, "groq", self._groq_key.text().strip())
+            dbmod.set_setting(self._conn, "chat_model_groq", self._groq_chat_model.text().strip())
         registry.reset_cache()
 
         try:
