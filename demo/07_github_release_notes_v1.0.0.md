@@ -33,10 +33,12 @@ Counts verified against the production database:
 
 ## Install
 
-1. **Download the installer** (`TomsLab-Setup-1.0.0.exe`) from the **Assets** section of this GitHub release.
-2. **Download the data pack** (`tomslab-data-2026-04-21.tar.zst`, ~10.5 GB) from the Google Drive folder:
-   👉 **https://drive.google.com/open?id=1Y6Yo1R46dfjSXp5AOYdbAKgHUKEdL0pW**
-   *(GitHub Releases caps individual assets at 2 GB; the data pack is too large to host here.)*
+> **Both files are hosted on Google Drive — not in GitHub Releases.** GitHub caps release assets at 2 GB; the installer and the data pack both live in the same Drive folder:
+>
+> 👉 **https://drive.google.com/drive/folders/1Y6Yo1R46dfjSXp5AOYdbAKgHUKEdL0pW**
+
+1. **Download the installer** — `TomsLab-Setup-1.0.0.exe` from the Drive folder above.
+2. **Download the data pack** — `tomslab-data-2026-04-21.tar.zst` (~10.5 GB) from the same Drive folder. When Drive warns it can't scan the file for viruses, choose **Download anyway** (this happens for any file over ~100 MB).
 3. **Run the installer**, accept the SmartScreen warning ("More info → Run anyway"), pick an install location, click Install.
 4. **Launch Tom's Lab** from the Start Menu, accept the disclaimer (one-time).
 5. **Install Ollama** from https://ollama.com/download/windows (required for query embedding):

@@ -101,8 +101,11 @@ available at any time under **Help → Disclaimer & Legal**.
 v1.0.0 ships as an **Inno Setup installer** — a single
 `TomsLab-Setup-1.0.0.exe`.
 
-1. Download `TomsLab-Setup-1.0.0.exe` from the Google Drive link in
-   the GitHub release notes.
+1. Download `TomsLab-Setup-1.0.0.exe` from the project's Google Drive
+   folder (the same folder also contains the data pack):
+   **https://drive.google.com/drive/folders/1Y6Yo1R46dfjSXp5AOYdbAKgHUKEdL0pW**
+   The installer is hosted on Drive — not on GitHub — because GitHub
+   Releases caps individual assets at 2 GB.
 2. Double-click the installer. Approve the UAC prompt.
 3. Follow the prompts — pick an install location (default
    `C:\Program Files\TomsLab`), choose whether to create a desktop
@@ -134,8 +137,9 @@ start.
 
 #### Steps
 
-1. Download the current data pack (`.tar.zst`) from the Google Drive
-   link listed in the GitHub release notes.
+1. Download the current data pack (`.tar.zst`) from the same Google
+   Drive folder as the installer:
+   **https://drive.google.com/drive/folders/1Y6Yo1R46dfjSXp5AOYdbAKgHUKEdL0pW**
 2. When prompted by Google Drive that it cannot scan the file for
    viruses, choose **Download anyway**. This warning appears for all
    files over approximately 100 MB.

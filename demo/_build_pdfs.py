@@ -312,6 +312,7 @@ if __name__ == "__main__":
         ("04_demo_script.md", "04_demo_script.pdf", "Demo Script"),
         ("05_what_is_toms_lab.md", "05_what_is_toms_lab.pdf", "Tom's Lab — What it is"),
         ("06_discord_announcement.md", "06_discord_announcement.pdf", "Discord Announcement"),
+        ("08_system_requirements.md", "08_system_requirements.pdf", "Tom's Lab — System Requirements"),
     ]
     for md, pdf, title in individual:
         build_pdf(here / pdf, [here / md], title)

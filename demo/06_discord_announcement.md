@@ -12,6 +12,8 @@
 >
 > **It is not a course.** It does not teach the methodology. It assumes you already follow Tom's content and want a faster way to dive deeper into a specific concept, find a specific post, or see how a topic has evolved. **It is not a trading tool** — no signals, no alerts, no strategy generation.
 >
+> **🛠 Requires Ollama** (free, local) to run the AI features — install from ollama.com and pull `nomic-embed-text` and `llama3.1:8b`. A free Gemini API key is optional but strongly recommended for higher-quality answers.
+>
 > **⚠️ Important disclaimers:**
 > - **Tom B has not reviewed or endorsed this app.** It is an independent third-party project.
 > - **Not affiliated with Tom B, Bookmap, the Bookmap Discord moderators, or Discord Inc.** Do not contact any of them about this app.
@@ -20,9 +22,10 @@
 > - **Bulk-exporting Discord messages and bulk-downloading YouTube content may violate those platforms' Terms of Service. Importing your own export and your own video downloads is your decision and your responsibility.**
 > - **AI answers can be wrong. Verify everything against the original source before relying on it.** This is an experimental research tool, not financial advice. All trading decisions are yours.
 >
-> 📦 **Download + install instructions:** https://github.com/SeanDavid-stack/tomslab/releases/tag/v1.0.0
+> 📦 **Downloads (installer + data pack):** https://drive.google.com/drive/folders/1Y6Yo1R46dfjSXp5AOYdbAKgHUKEdL0pW
+> 📖 **Install steps + release notes:** https://github.com/SeanDavid-stack/tomslab/releases/tag/v1.0.0
 >
-> *(The release page links to the installer and the data pack — data pack is hosted on Google Drive because it's 10.5 GB. The release notes have the install steps.)*
+> *(Both the installer and the 10.5 GB data pack are hosted on Google Drive — GitHub Releases caps individual files at 2 GB.)*
 
 ---
 
@@ -60,9 +63,10 @@ It runs entirely on your machine. Nothing phones home, no account required, no t
 
 ### How to install
 
-*[Download links — Google Drive folder containing `TomsLab-Setup-1.0.0.exe` and the data pack `.tar.zst`]*
+**Downloads (Drive folder — installer and data pack):**
+https://drive.google.com/drive/folders/1Y6Yo1R46dfjSXp5AOYdbAKgHUKEdL0pW
 
-1. Download the installer (`TomsLab-Setup-1.0.0.exe`) and the data pack (`.tar.zst`).
+1. Download the installer (`TomsLab-Setup-1.0.0.exe`) and the data pack (`.tar.zst`) from the Drive folder above.
 2. Run the installer. SmartScreen will warn — click **More info → Run anyway** if you accept the risk.
 3. Launch Tom's Lab.
 4. **File → Install data pack…** and pick the downloaded `.tar.zst`.

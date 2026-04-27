@@ -21,6 +21,44 @@ Published by **SDE-Software (SDES.DEV)**.
 
 ---
 
+## System requirements
+
+| Component | Status | Notes |
+|---|---|---|
+| OS | Required | Windows 10 or 11, 64-bit. Mac and Linux are unsupported. |
+| CPU | Required | 4-core x86-64. Embedding and classification are CPU-heavy. |
+| RAM | Required | 16 GB minimum. 32 GB recommended if you transcribe YouTube audio. |
+| Disk | Required | **~40 GB free.** App ≈ 5 GB; data pack download ≈ 10.5 GB; unpacks to ~25-30 GB on disk. |
+| [Ollama](https://ollama.com/download/windows) | Required | Free local AI used for query embedding. Ask Tom cannot embed questions without it. |
+| [Gemini API key](https://aistudio.google.com/apikey) | Recommended | Higher-quality Ask Tom answers than the Ollama fallback. Free tier is sufficient. |
+| [NVIDIA GPU + driver](https://www.nvidia.com/download/index.aspx) | Optional | The app runs on CPU. How much you miss the GPU depends on what you do — see below. |
+
+**How much does the GPU matter?**
+
+- *Searching the shipped data pack + Ask Tom via Gemini:* barely. Sub-second on CPU once embeddings load.
+- *Re-embedding your own Discord export, or re-running PDF OCR:* moderately slower — minutes become tens of minutes.
+- *Transcribing YouTube videos with Whisper:* **much, much slower.** A 1-hour video is ~10–30 min on a modern NVIDIA GPU vs **~1–3 hours on CPU**.
+- *Local Ask Tom fallback (no Gemini key, using Ollama Llama 3.1 8B):* big difference — slow trickle on CPU, near-instant on GPU.
+
+Faster disks help most during data-pack install: NVMe SSD ≈ 5–8 min, SATA SSD ≈ 8–15 min, mechanical HDD ≈ 25–45 min. Full operational detail is in [`USER_MANUAL.md`](USER_MANUAL.md) §2–3.
+
+---
+
+## Download
+
+**Both the installer and the data pack are hosted on Google Drive — not on GitHub.** GitHub Releases caps individual assets at 2 GB and the data pack alone is ~10.5 GB.
+
+👉 **[Tom's Lab — Google Drive folder](https://drive.google.com/drive/folders/1Y6Yo1R46dfjSXp5AOYdbAKgHUKEdL0pW)**
+
+The folder contains:
+
+- `TomsLab-Setup-1.0.0.exe` — the Windows installer
+- `tomslab-data-2026-04-21.tar.zst` — the pre-built data pack (~10.5 GB)
+
+When Drive warns it can't scan a file for viruses, choose **Download anyway** — that warning appears on every file over ~100 MB. After downloading both, run the installer first, then use **File → Install data pack…** inside the app to load the `.tar.zst`. Step-by-step in [`USER_MANUAL.md`](USER_MANUAL.md) §3.
+
+---
+
 ## Policy
 
 Tom's Lab is a free, as-is utility. By installing or using the
