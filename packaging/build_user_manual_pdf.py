@@ -436,7 +436,7 @@ def main() -> None:
     # Read app version from src/tomslab/__init__.py so the cover stays in sync
     init_text = (repo_root / "src" / "tomslab" / "__init__.py").read_text(encoding="utf-8")
     m = re.search(r'__version__\s*=\s*"([^"]+)"', init_text)
-    version = m.group(1) if m else "1.0.0"
+    version = m.group(1) if m else "1.0.1"
 
     from datetime import datetime
     date_label = datetime.now().strftime("%B %Y")

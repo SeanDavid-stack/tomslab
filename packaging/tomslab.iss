@@ -1,4 +1,4 @@
-; Inno Setup script for Tom's Lab v1.0.0
+; Inno Setup script for Tom's Lab v1.0.1
 ; Wraps the PyInstaller one-folder output at dist/tomslab/ into a single
 ; TomsLab-Setup-<version>.exe that installs to Program Files, registers
 ; an uninstaller, and drops Start Menu + desktop shortcuts.
@@ -6,9 +6,9 @@
 ; Build:
 ;   "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging\tomslab.iss
 ;
-; Output: pack-out\TomsLab-Setup-1.0.0.exe
+; Output: pack-out\TomsLab-Setup-1.0.1.exe
 
-#define AppVersion "1.0.0"
+#define AppVersion "1.0.1"
 #define AppName    "Tom's Lab"
 #define AppExe     "tomslab.exe"
 #define RepoRoot   "D:\Toms Lab"

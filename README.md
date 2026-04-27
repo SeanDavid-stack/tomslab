@@ -52,7 +52,7 @@ Faster disks help most during data-pack install: NVMe SSD ≈ 5–8 min, SATA SS
 
 The folder contains:
 
-- `TomsLab-Setup-1.0.0.exe` — the Windows installer
+- `TomsLab-Setup-1.0.1.exe` — the Windows installer
 - `tomslab-data-2026-04-21.tar.zst` — the pre-built data pack (~10.5 GB)
 
 When Drive warns it can't scan a file for viruses, choose **Download anyway** — that warning appears on every file over ~100 MB. After downloading both, run the installer first, then use **File → Install data pack…** inside the app to load the `.tar.zst`. Step-by-step in [`USER_MANUAL.md`](USER_MANUAL.md) §3.
@@ -96,12 +96,29 @@ SDE-Software's **BMBridge Lite**.
 
 ## Status
 
-**v1.0.0 — public release**. Ships as an Inno Setup installer
-(`TomsLab-Setup-1.0.0.exe`) on the project's release page. Not
-Authenticode-signed; SmartScreen will warn on first launch — see
+**v1.0.1 — patch release**. Ships as an Inno Setup installer
+(`TomsLab-Setup-1.0.1.exe`) hosted on the project's
+[Google Drive folder](https://drive.google.com/drive/folders/1Y6Yo1R46dfjSXp5AOYdbAKgHUKEdL0pW).
+Not Authenticode-signed; SmartScreen will warn on first launch — see
 [`USER_MANUAL.md`](USER_MANUAL.md) §3.1.
 
-### What's in this build (recent fixes)
+### What's new in v1.0.1
+
+- **Groq added as a third chat provider** alongside Gemini and Ollama.
+  Chat-only. Free-tier daily request limit is roughly 10× Gemini's
+  1,500/day, and LPU streaming is much faster — at the cost of
+  weaker citation discipline. Settings → AI Providers picks it up.
+- **Update notifications now actually fire.** v1.0.0 shipped pointing
+  at a JSON manifest URL that was never published, so no installed
+  v1.0.0 client could ever detect a newer release. The check now
+  queries the GitHub Releases API directly. Existing v1.0.0 installs
+  are silently migrated on first launch.
+- Documentation: README and the user manual have a System
+  Requirements section + a Download section with the Drive folder
+  link prominently placed; release notes no longer point at empty
+  GitHub Assets.
+
+### v1.0.0 — first public release
 
 - **Show in timeline** for any Discord citation now reaches messages
   outside the recent-history window — older posts load via a
@@ -232,7 +249,7 @@ pip install -r requirements.txt
 python -m tomslab
 ```
 
-A window titled "Tom's Lab v1.0.0" should appear.
+A window titled "Tom's Lab v1.0.1" should appear.
 
 ## Project layout
 

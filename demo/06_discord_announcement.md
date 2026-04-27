@@ -66,7 +66,7 @@ It runs entirely on your machine. Nothing phones home, no account required, no t
 **Downloads (Drive folder — installer and data pack):**
 https://drive.google.com/drive/folders/1Y6Yo1R46dfjSXp5AOYdbAKgHUKEdL0pW
 
-1. Download the installer (`TomsLab-Setup-1.0.0.exe`) and the data pack (`.tar.zst`) from the Drive folder above.
+1. Download the installer (`TomsLab-Setup-1.0.1.exe`) and the data pack (`.tar.zst`) from the Drive folder above.
 2. Run the installer. SmartScreen will warn — click **More info → Run anyway** if you accept the risk.
 3. Launch Tom's Lab.
 4. **File → Install data pack…** and pick the downloaded `.tar.zst`.

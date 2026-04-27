@@ -98,10 +98,10 @@ available at any time under **Help → Disclaimer & Legal**.
 
 ### 3.1 Install the application
 
-v1.0.0 ships as an **Inno Setup installer** — a single
-`TomsLab-Setup-1.0.0.exe`.
+v1.0.1 ships as an **Inno Setup installer** — a single
+`TomsLab-Setup-1.0.1.exe`.
 
-1. Download `TomsLab-Setup-1.0.0.exe` from the project's Google Drive
+1. Download `TomsLab-Setup-1.0.1.exe` from the project's Google Drive
    folder (the same folder also contains the data pack):
    **https://drive.google.com/drive/folders/1Y6Yo1R46dfjSXp5AOYdbAKgHUKEdL0pW**
    The installer is hosted on Drive — not on GitHub — because GitHub
