@@ -73,12 +73,22 @@ SENTINEL = "{DATA}"
 WEBP_QUALITY = 85
 WEBP_METHOD = 6
 ZSTD_LEVEL = 19
-REENCODE_EXTS = {".png", ".jpg", ".jpeg", ".bmp"}
-PASSTHROUGH_EXTS = {".webp", ".gif"}
+# Charts ingested at full Discord resolution (often 1920+ px wide) get
+# scaled down before re-encoding when MAX_WIDTH is set. CLIP downscales
+# to 224×224 internally so the loss of detail at search time is
+# negligible, but the on-disk savings are large for charts that come in
+# at 2K+. Set via the --max-width CLI flag; 0 = no downscale.
+MAX_WIDTH_DEFAULT = 0
+REENCODE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
+PASSTHROUGH_EXTS = {".gif"}
 
 # chart_decision values that mean "ship this chart" (auto_keep, keep, NULL).
 # Anything else (discard, auto_discard, pending…) is dropped from the pack.
 KEEP_DECISIONS = ("keep", "auto_keep")
+
+# When --tom-only is set, the build drops everything that isn't Tom's own
+# message (or attached to one). The featured-speaker flag in the DB is
+# the single source of truth for that.
 
 
 # ---------------------------------------------------------------------------
@@ -124,8 +134,9 @@ class BuildStats:
 # ---------------------------------------------------------------------------
 
 
-def _prep_db(src_db: Path, dst_db: Path) -> None:
-    """Copy tomslab.db to dst, clear PM-private rows, VACUUM before and after."""
+def _prep_db(src_db: Path, dst_db: Path, tom_only: bool = False) -> None:
+    """Copy tomslab.db to dst, clear PM-private rows, optionally filter to
+    Tom's messages only, VACUUM before and after."""
     LOG.info("Copying DB %s -> %s", src_db, dst_db)
     shutil.copy2(src_db, dst_db)
     # Best-effort: clear any WAL/SHM sidecars that came along with shutil — we
@@ -154,12 +165,91 @@ def _prep_db(src_db: Path, dst_db: Path) -> None:
                 # Table doesn't exist on very-old DBs — harmless.
                 LOG.warning("Skip %s: %s", tbl, exc)
 
+        if tom_only:
+            _filter_tom_only(conn)
+
         conn.commit()
         LOG.info("Post-scrub VACUUM")
         conn.execute("VACUUM;")
         conn.commit()
     finally:
         conn.close()
+
+
+def _filter_tom_only(conn: sqlite3.Connection) -> None:
+    """Drop every row that isn't Tom's. The single source of truth is
+    ``messages.is_featured_speaker = 1``; everything else cascades from
+    that. Conversation windows that don't contain a Tom message also
+    drop because their FK targets disappear.
+
+    This is destructive — the parent caller works on a copy of the DB,
+    not the source.
+    """
+    n_before = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+    LOG.info("Tom-only filter: starting from %d messages", n_before)
+
+    # Drop the conversation-window join tables first (FK to message_id).
+    for tbl, fk in (
+        ("window_messages", "message_id"),
+        ("window_embeddings", "window_id"),
+    ):
+        try:
+            if tbl == "window_embeddings":
+                # Windows that contain no Tom messages will be deleted
+                # below; their embeddings need to go too. Defer until
+                # after we've identified the surviving windows.
+                continue
+            conn.execute(
+                f"DELETE FROM {tbl} WHERE message_id IN ("
+                "  SELECT id FROM messages WHERE is_featured_speaker = 0"
+                ")"
+            )
+        except sqlite3.OperationalError:
+            pass
+
+    # Drop non-Tom attachments (and their image embeddings).
+    for sql in (
+        "DELETE FROM image_embeddings WHERE attachment_id IN ("
+        "  SELECT id FROM attachments WHERE message_id IN ("
+        "    SELECT id FROM messages WHERE is_featured_speaker = 0))",
+        "DELETE FROM attachments WHERE message_id IN ("
+        "  SELECT id FROM messages WHERE is_featured_speaker = 0)",
+    ):
+        try:
+            conn.execute(sql)
+        except sqlite3.OperationalError as exc:
+            LOG.warning("Skip filter step (%s): %s", sql.split()[1], exc)
+
+    # Drop non-Tom messages.
+    conn.execute("DELETE FROM messages WHERE is_featured_speaker = 0")
+
+    # Drop conversation windows that no longer contain any messages, then
+    # their embeddings.
+    try:
+        conn.execute(
+            "DELETE FROM conversation_windows WHERE id NOT IN ("
+            "  SELECT DISTINCT window_id FROM window_messages"
+            ")"
+        )
+        conn.execute(
+            "DELETE FROM window_embeddings WHERE window_id NOT IN ("
+            "  SELECT id FROM conversation_windows"
+            ")"
+        )
+    except sqlite3.OperationalError as exc:
+        LOG.warning("Skip window cleanup: %s", exc)
+
+    # Rebuild the FTS5 index against the now-Tom-only message rows.
+    try:
+        conn.execute("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')")
+    except sqlite3.OperationalError as exc:
+        LOG.warning("FTS rebuild skipped: %s", exc)
+
+    n_after = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+    LOG.info(
+        "Tom-only filter: %d -> %d messages kept (%.1f%%)",
+        n_before, n_after, 100.0 * n_after / max(n_before, 1),
+    )
 
 
 def _table_counts(db_path: Path) -> dict[str, int]:
@@ -193,7 +283,9 @@ def _shard(key: str) -> str:
     return h[:2]
 
 
-def _encode_worker(src_str: str, dst_str: str) -> tuple[int, int, bool, str | None]:
+def _encode_worker(
+    src_str: str, dst_str: str, max_width: int, quality: int
+) -> tuple[int, int, bool, str | None]:
     """ProcessPoolExecutor entry point. Converts exceptions to an error
     string so the parent can log-and-continue without losing the pool.
 
@@ -201,18 +293,22 @@ def _encode_worker(src_str: str, dst_str: str) -> tuple[int, int, bool, str | No
     Module-level so Windows ``spawn`` can pickle it.
     """
     try:
-        s, d, conv = _reencode_one(Path(src_str), Path(dst_str))
+        s, d, conv = _reencode_one(Path(src_str), Path(dst_str), max_width, quality)
         return (s, d, conv, None)
     except Exception as exc:
         return (0, 0, False, f"{type(exc).__name__}: {exc}")
 
 
-def _reencode_one(src: Path, dst: Path) -> tuple[int, int, bool]:
-    """Re-encode src → dst (WebP q85) or passthrough-copy if already WebP/GIF.
+def _reencode_one(
+    src: Path, dst: Path, max_width: int, quality: int
+) -> tuple[int, int, bool]:
+    """Re-encode src → dst (WebP) with optional downscale, or passthrough-copy.
 
     Returns ``(src_bytes, dst_bytes, converted)``. ``converted=False`` means
     a straight copy was performed (or the output already existed and
     matched the source size — idempotent re-run).
+
+    ``max_width`` of 0 disables downscaling (legacy behaviour).
     """
     src_bytes = src.stat().st_size
     ext = src.suffix.lower()
@@ -236,7 +332,14 @@ def _reencode_one(src: Path, dst: Path) -> tuple[int, int, bool]:
                     im = im.convert("RGBA")
                 else:
                     im = im.convert("RGB")
-            im.save(dst, "WEBP", quality=WEBP_QUALITY, method=WEBP_METHOD)
+            # Downscale wide images. We never upscale (that just bloats
+            # bytes for no signal). LANCZOS preserves chart text better
+            # than BILINEAR at the cost of a few ms per image.
+            if max_width and im.width > max_width:
+                ratio = max_width / im.width
+                new_h = max(1, int(round(im.height * ratio)))
+                im = im.resize((max_width, new_h), Image.Resampling.LANCZOS)
+            im.save(dst, "WEBP", quality=quality, method=WEBP_METHOD)
         return src_bytes, dst.stat().st_size, True
 
     # Unknown extension — copy as-is, log a warning once.
@@ -274,6 +377,8 @@ def _reencode_attachments(
     staging_data: Path,
     stats: _SizeTally,
     workers: int | None = None,
+    max_width: int = 0,
+    quality: int = WEBP_QUALITY,
 ) -> None:
     """Walk keeper attachments, copy/reencode into staging/, rewrite local_path.
 
@@ -328,7 +433,7 @@ def _reencode_attachments(
 
     with ProcessPoolExecutor(max_workers=n_workers) as ex:
         futures = {
-            ex.submit(_encode_worker, src, dst): (aid, sentinel_rel)
+            ex.submit(_encode_worker, src, dst, max_width, quality): (aid, sentinel_rel)
             for (aid, src, dst, sentinel_rel) in tasks
         }
         for fut in as_completed(futures):
@@ -377,6 +482,8 @@ def _reencode_doc_pages(
     staging_data: Path,
     stats: _SizeTally,
     workers: int | None = None,
+    max_width: int = 0,
+    quality: int = WEBP_QUALITY,
 ) -> None:
     rows = conn.execute(
         """
@@ -414,7 +521,7 @@ def _reencode_doc_pages(
 
     with ProcessPoolExecutor(max_workers=n_workers) as ex:
         futures = {
-            ex.submit(_encode_worker, src, dst): (page_id, sentinel_rel)
+            ex.submit(_encode_worker, src, dst, max_width, quality): (page_id, sentinel_rel)
             for (page_id, src, dst, sentinel_rel) in tasks
         }
         for fut in as_completed(futures):
@@ -523,6 +630,9 @@ def build(
     app_version: str,
     release_date: str | None = None,
     workers: int | None = None,
+    max_width: int = MAX_WIDTH_DEFAULT,
+    quality: int = WEBP_QUALITY,
+    tom_only: bool = False,
 ) -> dict:
     data_dir = data_dir.resolve()
     out_dir = out_dir.resolve()
@@ -531,7 +641,8 @@ def build(
         raise FileNotFoundError(f"No tomslab.db at {src_db}")
 
     release_date = release_date or date.today().isoformat()
-    pack_name = f"tomslab-data-{release_date}.tar.zst"
+    suffix = "-tom-only" if tom_only else ""
+    pack_name = f"tomslab-data{suffix}-{release_date}.tar.zst"
     out_pack = out_dir / pack_name
 
     stats = BuildStats(db_before_bytes=src_db.stat().st_size)
@@ -542,13 +653,19 @@ def build(
         staging_data.mkdir(parents=True, exist_ok=True)
 
         dst_db = staging_data / "tomslab.db"
-        _prep_db(src_db, dst_db)
+        _prep_db(src_db, dst_db, tom_only=tom_only)
 
         # Re-encode pass. Mutates dst_db's local_path / rendered_path columns.
         conn = sqlite3.connect(str(dst_db))
         try:
-            _reencode_attachments(conn, staging_data, stats.charts, workers=workers)
-            _reencode_doc_pages(conn, staging_data, stats.doc_pages, workers=workers)
+            _reencode_attachments(
+                conn, staging_data, stats.charts,
+                workers=workers, max_width=max_width, quality=quality,
+            )
+            _reencode_doc_pages(
+                conn, staging_data, stats.doc_pages,
+                workers=workers, max_width=max_width, quality=quality,
+            )
 
             # Final VACUUM so the path-rewrites don't leave loose pages.
             conn.commit()
@@ -632,6 +749,27 @@ def main(argv: list[str] | None = None) -> int:
         help="Parallel Pillow encoder processes. "
              "Default: min(16, os.cpu_count() - 1).",
     )
+    parser.add_argument(
+        "--max-width",
+        type=int,
+        default=MAX_WIDTH_DEFAULT,
+        help="Downscale any image wider than this (px) before re-encoding. "
+             "0 disables downscaling. Recommended: 1600.",
+    )
+    parser.add_argument(
+        "--quality",
+        type=int,
+        default=WEBP_QUALITY,
+        help=f"WebP quality 1–100. Default {WEBP_QUALITY}.",
+    )
+    parser.add_argument(
+        "--tom-only",
+        action="store_true",
+        help="Build a smaller pack that contains only Tom's own messages "
+             "and his attached charts. Drops community chatter and "
+             "third-party attachments. Output filename gets a "
+             "'-tom-only' suffix.",
+    )
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args(argv)
 
@@ -648,6 +786,9 @@ def main(argv: list[str] | None = None) -> int:
             app_version=args.app_version,
             release_date=args.release_date,
             workers=args.workers,
+            max_width=args.max_width,
+            quality=args.quality,
+            tom_only=args.tom_only,
         )
     except Exception as exc:
         LOG.error("Build failed: %s", exc, exc_info=True)

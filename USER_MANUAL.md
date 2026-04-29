@@ -87,7 +87,7 @@ available at any time under **Help → Disclaimer & Legal**.
 | OS | Required | Windows 10 or 11, 64-bit. Other platforms unsupported. |
 | CPU | Required | 4 cores, x86-64. Embedding and classification are CPU-heavy. |
 | RAM | Required | 16 GB minimum. 32 GB recommended if transcribing YouTube audio. |
-| Disk | Required | 15 GB free. Data pack ≈ 10 GB, app ≈ 5 GB. |
+| Disk | Required | Standard install: ~5 GB free (~1.6 GB app + ~3 GB unpacked data pack). GPU install: ~10 GB free (CUDA libraries add ~3 GB). |
 | [**Ollama**](https://ollama.com/download/windows) | **Required** | Local AI for query embedding. Ask Tom cannot embed questions without it. |
 | [Gemini API key](https://aistudio.google.com/apikey) | Recommended | Higher-quality Ask Tom answers than the local Ollama fallback. |
 | [NVIDIA GPU driver](https://www.nvidia.com/download/index.aspx) | Optional | Enables GPU acceleration for CLIP image search and Whisper transcription. Runs on CPU without. |
@@ -98,13 +98,19 @@ available at any time under **Help → Disclaimer & Legal**.
 
 ### 3.1 Install the application
 
-v1.0.1 ships as an **Inno Setup installer** — a single
-`TomsLab-Setup-1.0.1.exe`.
+v1.0.2 ships as **two parallel Inno Setup installers**. Pick one:
 
-1. Download `TomsLab-Setup-1.0.1.exe` from the project's Google Drive
+| Installer | When to pick it | Size |
+|---|---|---|
+| **`TomsLab-Setup-1.0.2.exe`** (Standard) | **Default for almost everyone.** No NVIDIA GPU acceleration — visual search and YouTube transcription run on CPU and are slower, but everything works. | ~700 MB |
+| `TomsLab-Setup-1.0.2-GPU.exe` (GPU) | You have an NVIDIA card and want GPU-accelerated visual search or fast YouTube transcription. Bundles the full CUDA driver libraries. | ~2.1 GB |
+
+If unsure, pick **Standard**. Day-to-day searching the shipped data pack feels identical either way once embeddings are loaded.
+
+1. Download your chosen installer from the project's Google Drive
    folder (the same folder also contains the data pack):
    **https://drive.google.com/drive/folders/1Y6Yo1R46dfjSXp5AOYdbAKgHUKEdL0pW**
-   The installer is hosted on Drive — not on GitHub — because GitHub
+   The installers are hosted on Drive — not on GitHub — because GitHub
    Releases caps individual assets at 2 GB.
 2. Double-click the installer. Approve the UAC prompt.
 3. Follow the prompts — pick an install location (default

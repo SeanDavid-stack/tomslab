@@ -46,16 +46,23 @@ Faster disks help most during data-pack install: NVMe SSD ≈ 5–8 min, SATA SS
 
 ## Download
 
-**Both the installer and the data pack are hosted on Google Drive — not on GitHub.** GitHub Releases caps individual assets at 2 GB and the data pack alone is ~10.5 GB.
+**Both installers and the data pack are hosted on Google Drive — not on GitHub.** GitHub Releases caps individual assets at 2 GB.
 
 👉 **[Tom's Lab — Google Drive folder](https://drive.google.com/drive/folders/1Y6Yo1R46dfjSXp5AOYdbAKgHUKEdL0pW)**
 
 The folder contains:
 
-- `TomsLab-Setup-1.0.1.exe` — the Windows installer
-- `tomslab-data-2026-04-21.tar.zst` — the pre-built data pack (~10.5 GB)
+**Installer (pick one):**
 
-When Drive warns it can't scan a file for viruses, choose **Download anyway** — that warning appears on every file over ~100 MB. After downloading both, run the installer first, then use **File → Install data pack…** inside the app to load the `.tar.zst`. Step-by-step in [`USER_MANUAL.md`](USER_MANUAL.md) §3.
+- **`TomsLab-Setup-1.0.2.exe`** — Standard installer (**225 MB**). **Pick this one unless you specifically need GPU acceleration.**
+- `TomsLab-Setup-1.0.2-GPU.exe` — GPU installer (~2.1 GB) with NVIDIA CUDA libraries bundled. Pick this if you have an NVIDIA card and plan to transcribe YouTube videos or do heavy visual searches.
+
+**Data pack (pick one):**
+
+- `tomslab-data-2026-04-27.tar.zst` — **Full pack** (**7.66 GB**). Tom + community Discord history (587K messages), Tom's PDFs, Tom's YouTube transcripts.
+- `tomslab-data-tom-only-2026-04-27.tar.zst` — **Tom-only pack** (**725 MB**). Just Tom's own messages and his attached charts (89,748 messages). Tom's PDFs and YouTube transcripts still included. Drops community context — replies to non-Tom users will show "(message not in pack)".
+
+When Drive warns it can't scan a file for viruses, choose **Download anyway** — that warning appears on every file over ~100 MB. After downloading the installer + data pack, run the installer first, then use **File → Install data pack…** inside the app to load the `.tar.zst`. Step-by-step in [`USER_MANUAL.md`](USER_MANUAL.md) §3.
 
 ---
 
@@ -96,13 +103,28 @@ SDE-Software's **BMBridge Lite**.
 
 ## Status
 
-**v1.0.1 — patch release**. Ships as an Inno Setup installer
-(`TomsLab-Setup-1.0.1.exe`) hosted on the project's
-[Google Drive folder](https://drive.google.com/drive/folders/1Y6Yo1R46dfjSXp5AOYdbAKgHUKEdL0pW).
-Not Authenticode-signed; SmartScreen will warn on first launch — see
-[`USER_MANUAL.md`](USER_MANUAL.md) §3.1.
+**v1.0.2 — slim release**. Ships as two parallel Inno Setup installers
+on the project's [Google Drive folder](https://drive.google.com/drive/folders/1Y6Yo1R46dfjSXp5AOYdbAKgHUKEdL0pW):
+a Standard installer (`TomsLab-Setup-1.0.2.exe`, ~700 MB, CPU PyTorch)
+and a GPU installer (`TomsLab-Setup-1.0.2-GPU.exe`, ~2.1 GB, CUDA
+libraries bundled). Not Authenticode-signed; SmartScreen will warn on
+first launch — see [`USER_MANUAL.md`](USER_MANUAL.md) §3.1.
 
-### What's new in v1.0.1
+### What's new in v1.0.2
+
+- **Two installer flavors.** v1.0.0 and v1.0.1 bundled the full NVIDIA
+  CUDA driver stack into every download — about 3 GB of libraries that
+  most users never used because they had no NVIDIA card. v1.0.2 splits
+  that: a small CPU-only installer becomes the default, and a separate
+  GPU installer carries the CUDA bits for users who want them. **Most
+  users save roughly 75% on installer size.**
+- **Smaller data pack.** Chart images are now downscaled to 1600 px
+  wide before WebP re-encoding. CLIP downscales to 224×224 internally
+  at search time, so search quality is unchanged but the data pack
+  is meaningfully smaller. Existing v1.0.1 data packs continue to
+  work — re-download is optional.
+
+### What was new in v1.0.1
 
 - **Groq added as a third chat provider** alongside Gemini and Ollama.
   Chat-only. Free-tier daily request limit is roughly 10× Gemini's
