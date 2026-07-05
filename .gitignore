@@ -63,3 +63,9 @@ pack-out/
 .env
 *.key
 settings.local.json
+
+# large build artifacts / derived transcripts (backup skips these)
+dist-cpu/
+transcripts_export/
+toms_lab_transcripts.zip
+_ai_university_LnyjLNizKHw_transcript.txt

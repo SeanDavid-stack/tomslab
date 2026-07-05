@@ -128,6 +128,20 @@ A **Sources** strip beneath every answer also lists the same citations explicitl
 
 ---
 
+## What you need to install alongside it
+
+Tom's Lab calls out to a couple of separate components for the AI features. **All of them are free.**
+
+| Component | Required? | What it's for | Where to get it |
+|---|---|---|---|
+| **Ollama** | **Required** | Local AI runtime. Embeds your queries via `nomic-embed-text` and runs the chat fallback via `llama3.1:8b`. Without it, Ask Tom cannot function. | [ollama.com/download/windows](https://ollama.com/download/windows) — free, installs as a Windows service. After installing run `ollama pull nomic-embed-text` and `ollama pull llama3.1:8b`. |
+| **Gemini API key** | Strongly recommended | Cloud AI for higher-quality Ask Tom answers. Falls back to Ollama if missing or rate-limited. | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) — free tier; paste the key into **File → Settings…** in Tom's Lab. |
+| **NVIDIA GPU driver** | Optional | GPU acceleration for CLIP visual search and Whisper video transcription. Tom's Lab still works on CPU, just slower. | [nvidia.com/download](https://www.nvidia.com/download/index.aspx) — free. |
+
+Tom's Lab itself (the installer) is also free. **No paid component is required at any point.**
+
+---
+
 ## Distribution & support model
 
 - **Free.** No fee, no subscription, no ads, no telemetry, no account.
